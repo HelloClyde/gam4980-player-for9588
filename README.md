@@ -5,6 +5,8 @@ BBK 9588 port of the GPLv3 `gam4980` emulator core.
 This project is intentionally separate from the SDK examples. It builds a
 standalone `GAM4980.BDA` with its own entry point, icons, game selector, and
 freestanding 9588 payload. It does not read or patch another BDA as a template.
+The payload includes only the parent SDK's formal `sdk/include/bda_sdk.h`; the
+research header and `reverse` include directory are not build dependencies.
 
 ## Local requirements
 
@@ -16,6 +18,8 @@ freestanding 9588 payload. It does not read or patch another BDA as a template.
   ```
 
 - The MIPS toolchain bundled or configured by the parent 9588 SDK.
+- A parent SDK revision whose formal include provides the verified heap,
+  seek, directory enumeration, frame lifecycle, and raw RGB565 picture APIs.
 
 Firmware dumps, games, saves, the patched BDA, and other generated artifacts
 must not be committed.

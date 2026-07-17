@@ -2,7 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "bda_research_sdk.h"
+#include "bda_sdk.h"
 #include "gam4980_core.h"
 
 #define _DATA1          0x00

@@ -44,7 +44,6 @@ def compile_payload(prefix: str, output_dir: Path) -> bytes:
     source = PROJECT_ROOT / "src" / "gam4980_payload.c"
     include_dirs = (
         PROJECT_ROOT / "src",
-        SDK_ROOT / "reverse",
         SDK_ROOT / "sdk" / "include",
     )
     for path in (source, *include_dirs):

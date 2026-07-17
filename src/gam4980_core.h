@@ -1,7 +1,7 @@
 #ifndef GAM4980_CORE_H
 #define GAM4980_CORE_H
 
-#include "bda_research_sdk.h"
+#include "bda_sdk.h"
 
 #define GAM4980_LCD_WIDTH 159
 #define GAM4980_LCD_HEIGHT 96

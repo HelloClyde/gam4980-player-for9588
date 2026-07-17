@@ -1,33 +1,5 @@
-#include "bda_research_sdk.h"
+#include "bda_sdk.h"
 #include "gam4980_core.h"
-
-typedef bda_frame_desc_like_t bda_frame_desc_t;
-typedef bda_gui_message_like_t bda_gui_message_t;
-typedef bda_gui_input_packet_like_t bda_gui_input_packet_t;
-
-#define BDA_MSG_DRAW_CONTEXT_ATTACH BDA_MSG_DRAW_CONTEXT_ATTACH_LIKE
-#define BDA_MSG_DRAW_CONTEXT_DETACH BDA_MSG_DRAW_CONTEXT_DETACH_LIKE
-#define bda_gui_draw_guard_begin bda_gui_draw_guard_begin_like
-#define bda_gui_draw_guard_end bda_gui_draw_guard_end_like
-#define bda_gui_register_frame_desc bda_gui_register_frame_desc_like
-#define bda_gui_frame_stop bda_gui_frame_stop_like
-#define bda_gui_frame_release bda_gui_frame_release_like
-#define bda_gui_default_proc bda_gui_default_proc_like
-#define bda_gui_frame_activate bda_gui_frame_activate_like
-#define bda_gui_event_pump_frame_once bda_gui_event_pump_frame_once_like
-#define bda_gui_close_frame bda_gui_close_frame_like
-#define bda_gui_end_draw bda_gui_end_draw_like
-#define bda_gui_compatible_context_create bda_gui_compat_context_create_like
-#define bda_gui_compatible_context_free bda_gui_surface_flush_like
-#define bda_gui_draw_object_create bda_gui_draw_object_create_like
-#define bda_gui_current_draw bda_gui_current_draw_like
-#define bda_gui_select_draw_object bda_gui_select_draw_object_like
-#define bda_gui_context_copy bda_gui_context_copy_like
-#define bda_gui_input_packet bda_gui_input_packet_like
-#define bda_gui_tick_count_25ms bda_gui_tick_count_25ms_like
-#define bda_gui_tick_elapsed_25ms bda_gui_tick_elapsed_25ms_like
-#define bda_gui_draw_vx bda_gui_draw_vx_like
-#define bda_sys_delay bda_sys_delay_like
 
 /* GCC may lower small initialized-array copies to these freestanding symbols. */
 void *memcpy(void *destination, const void *source, bda_size_t size)
@@ -126,7 +98,7 @@ static const u8 k_font[36][7] = {
 };
 
 static gam4980_buffers_t g_buffers;
-static bda_picture_like_t g_lcd_picture;
+static bda_gui_picture_t g_lcd_picture;
 static u8 *g_screen_vx;
 static bda_handle_t g_frame;
 static bda_handle_t g_draw;
@@ -232,22 +204,22 @@ static void add_game_path(const char *raw_path)
 
 static int scan_game_pattern(const char *pattern)
 {
-    bda_fs_find_data_like_t find_data;
+    bda_fs_find_data_t find_data;
     int result;
     u32 iterations = 0;
 
-    bda_fs_find_data_init_like(&find_data);
-    result = bda_fs_findfirst_like(pattern, 0x27u, &find_data);
+    bda_fs_find_data_init(&find_data);
+    result = bda_fs_findfirst(pattern, 0x27u, &find_data);
     if (result == -1)
         return 0;
     while (result != -1 && iterations++ < 256u) {
-        find_data.name_or_path12[sizeof(find_data.name_or_path12) - 1u] = 0;
-        add_game_path(find_data.name_or_path12);
+        find_data.name_or_path[sizeof(find_data.name_or_path) - 1u] = 0;
+        add_game_path(find_data.name_or_path);
         if (g_game_count >= MAX_GAME_FILES)
             break;
-        result = bda_fs_findnext_like(&find_data);
+        result = bda_fs_findnext(&find_data);
     }
-    (void)bda_fs_findclose_like(&find_data);
+    (void)bda_fs_findclose(&find_data);
     return g_game_count != 0u;
 }
 
@@ -257,7 +229,7 @@ static int scan_games(void)
     g_selected_game = 0;
     g_selector_top = 0;
     bda_memset(g_game_paths, 0, sizeof(g_game_paths));
-    if (bda_fs_chdir_like(k_data_dir) == -1)
+    if (bda_fs_chdir(k_data_dir) == -1)
         return 0;
     if (!scan_game_pattern("*.gam"))
         (void)scan_game_pattern("*.*");
@@ -757,19 +729,19 @@ static void draw_selector_names(void)
     u32 row;
 
     old_object = bda_gui_select_draw_object(g_back, g_draw_object);
-    normal = (u32)bda_gui_rgb_like(g_back, 220, 230, 232);
-    active = (u32)bda_gui_rgb_like(g_back, 255, 255, 255);
-    (void)bda_gui_set_text_mode_like(g_back, 1);
+    normal = (u32)bda_gui_rgb(g_back, 220, 230, 232);
+    active = (u32)bda_gui_rgb(g_back, 255, 255, 255);
+    (void)bda_gui_set_text_mode(g_back, 1);
     for (row = 0; row < SELECTOR_VISIBLE_ROWS; ++row) {
         u32 game_index = g_selector_top + row;
         int y = SELECTOR_ROW_TOP + (int)row * SELECTOR_ROW_HEIGHT + 5;
 
         if (game_index >= g_game_count)
             break;
-        (void)bda_gui_set_text_color_like(
+        (void)bda_gui_set_text_color(
             g_back, game_index == g_selected_game ? active : normal
         );
-        (void)bda_gui_draw_text_like(
+        (void)bda_gui_draw_text(
             g_back, 18, y, path_basename(g_game_paths[game_index]), -1
         );
     }
@@ -811,7 +783,7 @@ static int present_screen(void)
     g_lcd_picture.selected_index = -1;
     {
         void *old_object = bda_gui_select_draw_object(g_draw, g_draw_object);
-        draw_result = bda_gui_render_picture_like(
+        draw_result = bda_gui_render_picture(
             g_draw, VIEW_X, VIEW_Y, LCD_VX_WIDTH, VIEW_HEIGHT, &g_lcd_picture
         );
         (void)bda_gui_select_draw_object(g_draw, old_object);
@@ -1192,7 +1164,7 @@ int bda_main(void)
 {
     int result = 0;
 
-    (void)bda_fs_mkdir_like(k_data_dir);
+    (void)bda_fs_mkdir(k_data_dir);
     reset_log();
     log_line("START STANDALONE");
     g_game_path[0] = 0;
