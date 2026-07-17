@@ -1,0 +1,1243 @@
+#include "bda_research_sdk.h"
+#include "gam4980_core.h"
+
+typedef bda_frame_desc_like_t bda_frame_desc_t;
+typedef bda_gui_message_like_t bda_gui_message_t;
+typedef bda_gui_input_packet_like_t bda_gui_input_packet_t;
+
+#define BDA_MSG_DRAW_CONTEXT_ATTACH BDA_MSG_DRAW_CONTEXT_ATTACH_LIKE
+#define BDA_MSG_DRAW_CONTEXT_DETACH BDA_MSG_DRAW_CONTEXT_DETACH_LIKE
+#define bda_gui_draw_guard_begin bda_gui_draw_guard_begin_like
+#define bda_gui_draw_guard_end bda_gui_draw_guard_end_like
+#define bda_gui_register_frame_desc bda_gui_register_frame_desc_like
+#define bda_gui_frame_stop bda_gui_frame_stop_like
+#define bda_gui_frame_release bda_gui_frame_release_like
+#define bda_gui_default_proc bda_gui_default_proc_like
+#define bda_gui_frame_activate bda_gui_frame_activate_like
+#define bda_gui_event_pump_frame_once bda_gui_event_pump_frame_once_like
+#define bda_gui_close_frame bda_gui_close_frame_like
+#define bda_gui_end_draw bda_gui_end_draw_like
+#define bda_gui_compatible_context_create bda_gui_compat_context_create_like
+#define bda_gui_compatible_context_free bda_gui_surface_flush_like
+#define bda_gui_draw_object_create bda_gui_draw_object_create_like
+#define bda_gui_current_draw bda_gui_current_draw_like
+#define bda_gui_select_draw_object bda_gui_select_draw_object_like
+#define bda_gui_context_copy bda_gui_context_copy_like
+#define bda_gui_input_packet bda_gui_input_packet_like
+#define bda_gui_tick_count_25ms bda_gui_tick_count_25ms_like
+#define bda_gui_tick_elapsed_25ms bda_gui_tick_elapsed_25ms_like
+#define bda_gui_draw_vx bda_gui_draw_vx_like
+#define bda_sys_delay bda_sys_delay_like
+
+/* GCC may lower small initialized-array copies to these freestanding symbols. */
+void *memcpy(void *destination, const void *source, bda_size_t size)
+{
+    bda_memcpy(destination, source, size);
+    return destination;
+}
+
+void *memset(void *destination, int value, bda_size_t size)
+{
+    bda_memset(destination, value, size);
+    return destination;
+}
+
+#define SCREEN_WIDTH 240
+#define SCREEN_HEIGHT 320
+#define VX_HEADER_SIZE 24u
+#define SCREEN_VX_BYTES (VX_HEADER_SIZE + SCREEN_WIDTH * SCREEN_HEIGHT * 2u)
+#define LCD_VX_WIDTH (GAM4980_LCD_WIDTH + 1)
+#define CORE_FRAME_BYTES ((GAM4980_LCD_WIDTH + 1u) * GAM4980_LCD_HEIGHT * 2u)
+
+#define VIEW_X 40
+#define VIEW_Y 30
+#define VIEW_WIDTH GAM4980_LCD_WIDTH
+#define VIEW_HEIGHT GAM4980_LCD_HEIGHT
+
+#define MAX_GAME_FILES 24u
+#define SELECTOR_VISIBLE_ROWS 7u
+#define SELECTOR_ROW_TOP 72
+#define SELECTOR_ROW_HEIGHT 30
+
+#define WINDOW_MODE_SELECTOR 0
+#define WINDOW_MODE_GAME 1
+
+#define TOUCH_QUEUE_SIZE 16u
+#define ESCAPE_QUIT_TICKS 40u
+#define SAVE_INTERVAL_TICKS 400u
+#define MAX_CATCHUP_TICKS 8u
+
+typedef struct touch_button {
+    s32 x;
+    s32 y;
+    s32 width;
+    s32 height;
+    u8 key;
+    const char *label;
+} touch_button_t;
+
+static const char k_window_title[] = "GAM4980";
+static const char k_selector_title[] = "SELECT GAM";
+static const char k_data_dir[] =
+    "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980";
+static const char k_rom_8_path[] =
+    "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\8.BIN";
+static const char k_rom_e_path[] =
+    "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\E.BIN";
+static const char k_log_path[] =
+    "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\GAM4980.LOG";
+
+static const touch_button_t k_buttons[] = {
+    { 54, 166, 42, 42, GAM4980_KEY_UP, 0 },
+    { 10, 210, 42, 42, GAM4980_KEY_LEFT, 0 },
+    { 98, 210, 42, 42, GAM4980_KEY_RIGHT, 0 },
+    { 54, 254, 42, 42, GAM4980_KEY_DOWN, 0 },
+    { 150, 166, 82, 54, GAM4980_KEY_ENTER, "ENTER" },
+    { 150, 228, 82, 42, GAM4980_KEY_EXIT, "EXIT" },
+    { 150, 278, 38, 34, GAM4980_KEY_PAGE_UP, "PGUP" },
+    { 194, 278, 38, 34, GAM4980_KEY_PAGE_DOWN, "PGDN" },
+};
+
+static const touch_button_t k_selector_buttons[] = {
+    { 10, 284, 38, 28, GAM4980_KEY_UP, 0 },
+    { 54, 284, 38, 28, GAM4980_KEY_DOWN, 0 },
+    { 150, 284, 80, 28, GAM4980_KEY_ENTER, "OPEN" },
+};
+
+static const u8 k_font[36][7] = {
+    {0x0e,0x11,0x13,0x15,0x19,0x11,0x0e}, {0x04,0x0c,0x04,0x04,0x04,0x04,0x0e},
+    {0x0e,0x11,0x01,0x02,0x04,0x08,0x1f}, {0x1e,0x01,0x01,0x0e,0x01,0x01,0x1e},
+    {0x02,0x06,0x0a,0x12,0x1f,0x02,0x02}, {0x1f,0x10,0x10,0x1e,0x01,0x01,0x1e},
+    {0x0e,0x10,0x10,0x1e,0x11,0x11,0x0e}, {0x1f,0x01,0x02,0x04,0x08,0x08,0x08},
+    {0x0e,0x11,0x11,0x0e,0x11,0x11,0x0e}, {0x0e,0x11,0x11,0x0f,0x01,0x01,0x0e},
+    {0x0e,0x11,0x11,0x1f,0x11,0x11,0x11}, {0x1e,0x11,0x11,0x1e,0x11,0x11,0x1e},
+    {0x0f,0x10,0x10,0x10,0x10,0x10,0x0f}, {0x1e,0x11,0x11,0x11,0x11,0x11,0x1e},
+    {0x1f,0x10,0x10,0x1e,0x10,0x10,0x1f}, {0x1f,0x10,0x10,0x1e,0x10,0x10,0x10},
+    {0x0f,0x10,0x10,0x17,0x11,0x11,0x0f}, {0x11,0x11,0x11,0x1f,0x11,0x11,0x11},
+    {0x0e,0x04,0x04,0x04,0x04,0x04,0x0e}, {0x01,0x01,0x01,0x01,0x11,0x11,0x0e},
+    {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, {0x10,0x10,0x10,0x10,0x10,0x10,0x1f},
+    {0x11,0x1b,0x15,0x15,0x11,0x11,0x11}, {0x11,0x19,0x15,0x13,0x11,0x11,0x11},
+    {0x0e,0x11,0x11,0x11,0x11,0x11,0x0e}, {0x1e,0x11,0x11,0x1e,0x10,0x10,0x10},
+    {0x0e,0x11,0x11,0x11,0x15,0x12,0x0d}, {0x1e,0x11,0x11,0x1e,0x14,0x12,0x11},
+    {0x0f,0x10,0x10,0x0e,0x01,0x01,0x1e}, {0x1f,0x04,0x04,0x04,0x04,0x04,0x04},
+    {0x11,0x11,0x11,0x11,0x11,0x11,0x0e}, {0x11,0x11,0x11,0x11,0x11,0x0a,0x04},
+    {0x11,0x11,0x11,0x15,0x15,0x15,0x0a}, {0x11,0x11,0x0a,0x04,0x0a,0x11,0x11},
+    {0x11,0x11,0x0a,0x04,0x04,0x04,0x04}, {0x1f,0x01,0x02,0x04,0x08,0x10,0x1f},
+};
+
+static gam4980_buffers_t g_buffers;
+static bda_picture_like_t g_lcd_picture;
+static u8 *g_screen_vx;
+static bda_handle_t g_frame;
+static bda_handle_t g_draw;
+static bda_handle_t g_draw_owner;
+static bda_handle_t g_back;
+static void *g_draw_object;
+static u32 g_touch_queue[TOUCH_QUEUE_SIZE];
+static volatile u32 g_touch_read;
+static volatile u32 g_touch_write;
+static volatile int g_detached;
+static char g_game_path[260];
+static char g_game_paths[MAX_GAME_FILES][260];
+static char g_save_path[160];
+static u32 g_game_count;
+static u32 g_selected_game;
+static u32 g_selector_top;
+static u32 g_previous_keys;
+static u32 g_hold_frames[6];
+static u32 g_escape_down_tick;
+static u32 g_frame_count;
+static u32 g_loaded_game_size;
+static u32 g_core_frame_phase;
+static int g_window_mode;
+static int g_full_redraw;
+static int g_selector_redraw;
+static int g_start_requested;
+static int g_escape_pending;
+static int g_close_requested;
+static int g_core_break_logged;
+
+static void copy_text(char *out, const char *text, u32 capacity)
+{
+    u32 index = 0;
+
+    if (!capacity)
+        return;
+    if (text) {
+        while (text[index] && index + 1u < capacity) {
+            out[index] = text[index];
+            ++index;
+        }
+    }
+    out[index] = 0;
+}
+
+static u32 text_length(const char *text)
+{
+    u32 length = 0;
+    while (text[length])
+        ++length;
+    return length;
+}
+
+static char ascii_lower(char character)
+{
+    if (character >= 'A' && character <= 'Z')
+        return (char)(character + ('a' - 'A'));
+    return character;
+}
+
+static const char *path_basename(const char *path)
+{
+    const char *name = path;
+
+    while (*path) {
+        if (*path == '\\' || *path == '/')
+            name = path + 1;
+        ++path;
+    }
+    return name;
+}
+
+static int is_gam_name(const char *name)
+{
+    u32 length = text_length(name);
+
+    return length > 4u && name[length - 4u] == '.' &&
+           ascii_lower(name[length - 3u]) == 'g' &&
+           ascii_lower(name[length - 2u]) == 'a' &&
+           ascii_lower(name[length - 1u]) == 'm';
+}
+
+static void add_game_path(const char *raw_path)
+{
+    const char *name = path_basename(raw_path);
+    char *out;
+    u32 remaining;
+
+    if (!name[0] || !is_gam_name(name) || g_game_count >= MAX_GAME_FILES)
+        return;
+    copy_text(g_game_paths[g_game_count], k_data_dir,
+              sizeof(g_game_paths[g_game_count]));
+    out = g_game_paths[g_game_count] + text_length(g_game_paths[g_game_count]);
+    remaining = (u32)(g_game_paths[g_game_count] +
+                      sizeof(g_game_paths[g_game_count]) - out);
+    if (remaining > 1u) {
+        *out++ = '\\';
+        --remaining;
+    }
+    copy_text(out, name, remaining);
+    ++g_game_count;
+}
+
+static int scan_game_pattern(const char *pattern)
+{
+    bda_fs_find_data_like_t find_data;
+    int result;
+    u32 iterations = 0;
+
+    bda_fs_find_data_init_like(&find_data);
+    result = bda_fs_findfirst_like(pattern, 0x27u, &find_data);
+    if (result == -1)
+        return 0;
+    while (result != -1 && iterations++ < 256u) {
+        find_data.name_or_path12[sizeof(find_data.name_or_path12) - 1u] = 0;
+        add_game_path(find_data.name_or_path12);
+        if (g_game_count >= MAX_GAME_FILES)
+            break;
+        result = bda_fs_findnext_like(&find_data);
+    }
+    (void)bda_fs_findclose_like(&find_data);
+    return g_game_count != 0u;
+}
+
+static int scan_games(void)
+{
+    g_game_count = 0;
+    g_selected_game = 0;
+    g_selector_top = 0;
+    bda_memset(g_game_paths, 0, sizeof(g_game_paths));
+    if (bda_fs_chdir_like(k_data_dir) == -1)
+        return 0;
+    if (!scan_game_pattern("*.gam"))
+        (void)scan_game_pattern("*.*");
+    return g_game_count != 0u;
+}
+
+static void log_line(const char *text)
+{
+    static const char newline[] = "\r\n";
+    int file = bda_fs_fopen_raw(k_log_path, "ab");
+
+    if (!bda_fs_file_is_valid(file))
+        return;
+    (void)bda_fs_write_raw(file, text, text_length(text));
+    (void)bda_fs_write_raw(file, newline, 2);
+    (void)bda_fs_close_raw(file);
+}
+
+static void log_hex_value(const char *prefix, u32 value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char line[48];
+    u32 length;
+    int shift;
+
+    copy_text(line, prefix, sizeof(line));
+    length = text_length(line);
+    for (shift = 28; shift >= 0 && length + 1u < sizeof(line); shift -= 4)
+        line[length++] = hex[(value >> shift) & 0x0fu];
+    line[length] = 0;
+    log_line(line);
+}
+
+static void reset_log(void)
+{
+    int file = bda_fs_fopen_raw(k_log_path, "wb");
+    if (bda_fs_file_is_valid(file))
+        (void)bda_fs_close_raw(file);
+}
+
+static int valid_pointer(const void *pointer)
+{
+    return pointer && (s32)(u32)pointer != -1;
+}
+
+static void release_buffers(void)
+{
+    gam4980_deinit();
+    if (valid_pointer(g_screen_vx))
+        bda_free(g_screen_vx);
+    if (valid_pointer(g_buffers.framebuffer))
+        bda_free(g_buffers.framebuffer);
+    if (valid_pointer(g_buffers.ram))
+        bda_free(g_buffers.ram);
+    if (valid_pointer(g_buffers.flash))
+        bda_free(g_buffers.flash);
+    if (valid_pointer(g_buffers.rom_8))
+        bda_free(g_buffers.rom_8);
+    if (valid_pointer(g_buffers.rom_e))
+        bda_free(g_buffers.rom_e);
+    bda_memset(&g_buffers, 0, sizeof(g_buffers));
+    g_screen_vx = 0;
+}
+
+static int allocate_buffers(void)
+{
+    bda_memset(&g_buffers, 0, sizeof(g_buffers));
+    g_screen_vx = 0;
+
+    g_buffers.ram = (u8 *)bda_alloc(GAM4980_RAM_SIZE);
+    g_buffers.flash = (u8 *)bda_alloc(GAM4980_FLASH_SIZE);
+    g_buffers.rom_8 = (u8 *)bda_alloc(GAM4980_ROM_SIZE);
+    g_buffers.rom_e = (u8 *)bda_alloc(GAM4980_ROM_SIZE);
+    g_buffers.framebuffer = (u16 *)bda_alloc(CORE_FRAME_BYTES);
+    g_screen_vx = (u8 *)bda_alloc(SCREEN_VX_BYTES);
+    if (!valid_pointer(g_buffers.ram) || !valid_pointer(g_buffers.flash) ||
+        !valid_pointer(g_buffers.rom_8) || !valid_pointer(g_buffers.rom_e) ||
+        !valid_pointer(g_buffers.framebuffer) || !valid_pointer(g_screen_vx)) {
+        release_buffers();
+        return 0;
+    }
+    bda_memset(&g_lcd_picture, 0, sizeof(g_lcd_picture));
+    g_lcd_picture.width = LCD_VX_WIDTH;
+    g_lcd_picture.height = VIEW_HEIGHT;
+    g_lcd_picture.source_pixels = g_buffers.framebuffer;
+    g_lcd_picture.selected_index = -1;
+    return 1;
+}
+
+static int read_exact(int file, u8 *out, u32 size)
+{
+    u32 total = 0;
+
+    while (total < size) {
+        int got = bda_fs_read_raw(file, out + total, size - total);
+        if (got <= 0)
+            return 0;
+        total += (u32)got;
+    }
+    return 1;
+}
+
+static int write_exact(int file, const u8 *data, u32 size)
+{
+    u32 total = 0;
+
+    while (total < size) {
+        int wrote = bda_fs_write_raw(file, data + total, size - total);
+        if (wrote <= 0)
+            return 0;
+        total += (u32)wrote;
+    }
+    return 1;
+}
+
+static int load_fixed_file(const char *path, u8 *out, u32 expected_size)
+{
+    int file = bda_fs_fopen_raw(path, "rb");
+    int size;
+    int ok;
+
+    if (!bda_fs_file_is_valid(file))
+        return 0;
+    if (bda_fs_seek_raw(file, 0, BDA_SEEK_END) < 0) {
+        (void)bda_fs_close_raw(file);
+        return 0;
+    }
+    size = bda_fs_tell_raw(file);
+    if (size != (int)expected_size || bda_fs_seek_raw(file, 0, BDA_SEEK_SET) < 0) {
+        (void)bda_fs_close_raw(file);
+        return 0;
+    }
+    ok = read_exact(file, out, expected_size);
+    (void)bda_fs_close_raw(file);
+    return ok;
+}
+
+static u32 fnv1a(const u8 *data, u32 size, u32 hash)
+{
+    u32 index;
+    for (index = 0; index < size; ++index) {
+        hash ^= data[index];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static void make_save_path(const u8 *header, u32 size)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    u32 hash = fnv1a(header, GAM4980_GAME_HEADER_SIZE, 2166136261u);
+    char *out = g_save_path;
+    int shift;
+
+    hash = fnv1a((const u8 *)&size, sizeof(size), hash);
+    copy_text(g_save_path, k_data_dir, sizeof(g_save_path));
+    out += text_length(out);
+    *out++ = '\\';
+    *out++ = 'S';
+    for (shift = 28; shift >= 0; shift -= 4)
+        *out++ = hex[(hash >> shift) & 0x0f];
+    copy_text(out, ".SAV", (u32)(g_save_path + sizeof(g_save_path) - out));
+}
+
+static void load_save(void)
+{
+    int file = bda_fs_fopen_raw(g_save_path, "rb");
+    int size;
+
+    if (!bda_fs_file_is_valid(file))
+        return;
+    if (bda_fs_seek_raw(file, 0, BDA_SEEK_END) < 0) {
+        (void)bda_fs_close_raw(file);
+        return;
+    }
+    size = bda_fs_tell_raw(file);
+    if (size == (int)GAM4980_SAVE_SIZE &&
+        bda_fs_seek_raw(file, 0, BDA_SEEK_SET) >= 0 &&
+        read_exact(file, gam4980_save_data(), GAM4980_SAVE_SIZE)) {
+        log_line("SAVE LOADED");
+    }
+    (void)bda_fs_close_raw(file);
+}
+
+static void write_save(void)
+{
+    int file;
+    int ok;
+
+    if (!g_save_path[0] || !gam4980_save_data() || !gam4980_save_dirty())
+        return;
+    file = bda_fs_fopen_raw(g_save_path, "wb");
+    if (!bda_fs_file_is_valid(file)) {
+        log_line("SAVE OPEN FAILED");
+        return;
+    }
+    ok = write_exact(file, gam4980_save_data(), GAM4980_SAVE_SIZE);
+    if (!ok)
+        log_line("SAVE WRITE FAILED");
+    (void)bda_fs_close_raw(file);
+    if (ok) {
+        gam4980_save_mark_clean();
+        log_line("SAVE WRITTEN");
+    }
+}
+
+static int load_game(const char *path)
+{
+    u8 header[GAM4980_GAME_HEADER_SIZE];
+    int file = bda_fs_fopen_raw(path, "rb");
+    int size;
+
+    if (!bda_fs_file_is_valid(file))
+        return -1;
+    if (bda_fs_seek_raw(file, 0, BDA_SEEK_END) < 0) {
+        (void)bda_fs_close_raw(file);
+        return -2;
+    }
+    size = bda_fs_tell_raw(file);
+    if (size < (int)GAM4980_GAME_HEADER_SIZE ||
+        size > (int)GAM4980_GAME_MAX_SIZE ||
+        bda_fs_seek_raw(file, 0, BDA_SEEK_SET) < 0 ||
+        !read_exact(file, header, GAM4980_GAME_HEADER_SIZE) ||
+        bda_fs_seek_raw(file, 0, BDA_SEEK_SET) < 0 ||
+        !read_exact(file, gam4980_game_storage(), (u32)size)) {
+        (void)bda_fs_close_raw(file);
+        return -3;
+    }
+    (void)bda_fs_close_raw(file);
+    if (gam4980_load_game_header(header, (u32)size) <= 0)
+        return -4;
+    g_loaded_game_size = (u32)size;
+    make_save_path(header, (u32)size);
+    load_save();
+    gam4980_save_mark_clean();
+    return 1;
+}
+
+static void write_u16_le(u8 *out, u16 value)
+{
+    out[0] = (u8)value;
+    out[1] = (u8)(value >> 8);
+}
+
+static void write_u32_le(u8 *out, u32 value)
+{
+    out[0] = (u8)value;
+    out[1] = (u8)(value >> 8);
+    out[2] = (u8)(value >> 16);
+    out[3] = (u8)(value >> 24);
+}
+
+static u16 rgb565(u32 red, u32 green, u32 blue)
+{
+    return (u16)(((red & 0xf8u) << 8) | ((green & 0xfcu) << 3) | (blue >> 3));
+}
+
+static void write_vx_header(u8 *image, u32 width, u32 height)
+{
+    int index;
+
+    bda_memset(image, 0, VX_HEADER_SIZE);
+    image[0] = 'V';
+    image[1] = 'X';
+    for (index = 2; index < 6; ++index)
+        image[index] = 0xcc;
+    write_u32_le(image + 6, width);
+    write_u32_le(image + 10, height);
+    for (index = 14; index < 20; ++index)
+        image[index] = 0xcc;
+    for (index = 20; index < (int)VX_HEADER_SIZE; ++index)
+        image[index] = 0xff;
+}
+
+static void init_full_vx(void)
+{
+    bda_memset(g_screen_vx, 0, SCREEN_VX_BYTES);
+    write_vx_header(g_screen_vx, SCREEN_WIDTH, SCREEN_HEIGHT);
+}
+
+static void put_pixel(int x, int y, u16 color)
+{
+    u32 offset;
+    if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT)
+        return;
+    offset = VX_HEADER_SIZE + (u32)(y * SCREEN_WIDTH + x) * 2u;
+    write_u16_le(g_screen_vx + offset, color);
+}
+
+static void fill_rect(int x, int y, int width, int height, u16 color)
+{
+    int px;
+    int py;
+    for (py = y; py < y + height; ++py)
+        for (px = x; px < x + width; ++px)
+            put_pixel(px, py, color);
+}
+
+static void frame_rect(int x, int y, int width, int height, u16 color)
+{
+    int index;
+    for (index = 0; index < width; ++index) {
+        put_pixel(x + index, y, color);
+        put_pixel(x + index, y + height - 1, color);
+    }
+    for (index = 1; index + 1 < height; ++index) {
+        put_pixel(x, y + index, color);
+        put_pixel(x + width - 1, y + index, color);
+    }
+}
+
+static int glyph_index(char character)
+{
+    if (character >= '0' && character <= '9')
+        return character - '0';
+    if (character >= 'A' && character <= 'Z')
+        return 10 + character - 'A';
+    return -1;
+}
+
+static void draw_text(int x, int y, const char *text, int scale, u16 color)
+{
+    while (*text) {
+        int glyph = glyph_index(*text++);
+        int row;
+        int column;
+        if (glyph >= 0) {
+            for (row = 0; row < 7; ++row) {
+                for (column = 0; column < 5; ++column) {
+                    if (k_font[glyph][row] & (1u << (4 - column)))
+                        fill_rect(x + column * scale, y + row * scale,
+                                  scale, scale, color);
+                }
+            }
+        }
+        x += 6 * scale;
+    }
+}
+
+static int label_width(const char *text, int scale)
+{
+    return (int)text_length(text) * 6 * scale - scale;
+}
+
+static void draw_arrow(const touch_button_t *button)
+{
+    int cx = button->x + button->width / 2;
+    int cy = button->y + button->height / 2;
+    u16 color = rgb565(238, 244, 239);
+    int row;
+
+    if (button->key == GAM4980_KEY_UP || button->key == GAM4980_KEY_DOWN) {
+        for (row = 0; row < 11; ++row) {
+            int width = row * 2 + 1;
+            int y = button->key == GAM4980_KEY_UP ? cy - 12 + row : cy + 12 - row;
+            fill_rect(cx - width / 2, y, width, 1, color);
+        }
+        fill_rect(cx - 3, cy - 1, 7, 13, color);
+    } else {
+        for (row = 0; row < 11; ++row) {
+            int height = row * 2 + 1;
+            int x = button->key == GAM4980_KEY_LEFT ? cx - 12 + row : cx + 12 - row;
+            fill_rect(x, cy - height / 2, 1, height, color);
+        }
+        fill_rect(cx - 1, cy - 3, 13, 7, color);
+        if (button->key == GAM4980_KEY_RIGHT)
+            fill_rect(cx - 11, cy - 3, 13, 7, color);
+    }
+}
+
+static void draw_button(const touch_button_t *button)
+{
+    u16 border = rgb565(41, 178, 178);
+    u16 fill = rgb565(27, 45, 55);
+    u16 text = rgb565(238, 244, 239);
+    int scale = button->width >= 70 ? 2 : 1;
+
+    fill_rect(button->x, button->y, button->width, button->height, border);
+    fill_rect(button->x + 2, button->y + 2,
+              button->width - 4, button->height - 4, fill);
+    if (button->label) {
+        int width = label_width(button->label, scale);
+        draw_text(button->x + (button->width - width) / 2,
+                  button->y + (button->height - 7 * scale) / 2,
+                  button->label, scale, text);
+    } else {
+        draw_arrow(button);
+    }
+}
+
+static void copy_lcd_to_full_vx(void)
+{
+    const u16 *source = gam4980_framebuffer();
+    int y;
+
+    for (y = 0; y < VIEW_HEIGHT; ++y) {
+        u8 *destination = g_screen_vx + VX_HEADER_SIZE +
+            (u32)((VIEW_Y + y) * SCREEN_WIDTH + VIEW_X) * 2u;
+        bda_memcpy(destination,
+                   source + y * (GAM4980_LCD_WIDTH + 1),
+                   VIEW_WIDTH * 2u);
+    }
+}
+
+static void render_game_screen(void)
+{
+    u16 background = rgb565(10, 20, 27);
+    u16 frame = rgb565(238, 177, 45);
+    u32 index;
+
+    init_full_vx();
+    fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, background);
+    fill_rect(VIEW_X - 2, VIEW_Y - 2, VIEW_WIDTH + 4, VIEW_HEIGHT + 4, frame);
+    frame_rect(VIEW_X - 3, VIEW_Y - 3, VIEW_WIDTH + 6, VIEW_HEIGHT + 6,
+               rgb565(36, 55, 63));
+    copy_lcd_to_full_vx();
+    for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index)
+        draw_button(&k_buttons[index]);
+}
+
+static void render_selector_background(void)
+{
+    u16 background = rgb565(10, 20, 27);
+    u16 panel = rgb565(24, 39, 48);
+    u16 border = rgb565(41, 178, 178);
+    u16 selected = rgb565(35, 91, 99);
+    u32 row;
+
+    init_full_vx();
+    fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, background);
+    draw_text(64, 18, k_selector_title, 2, rgb565(238, 244, 239));
+    fill_rect(12, 54, 216, 2, rgb565(238, 177, 45));
+    for (row = 0; row < SELECTOR_VISIBLE_ROWS; ++row) {
+        u32 game_index = g_selector_top + row;
+        int y = SELECTOR_ROW_TOP + (int)row * SELECTOR_ROW_HEIGHT;
+
+        if (game_index >= g_game_count)
+            break;
+        fill_rect(10, y, 220, SELECTOR_ROW_HEIGHT - 4,
+                  game_index == g_selected_game ? selected : panel);
+        frame_rect(10, y, 220, SELECTOR_ROW_HEIGHT - 4,
+                   game_index == g_selected_game ? border : rgb565(47, 65, 73));
+    }
+    for (row = 0; row < sizeof(k_selector_buttons) / sizeof(k_selector_buttons[0]); ++row)
+        draw_button(&k_selector_buttons[row]);
+}
+
+static void release_draw_context(void)
+{
+    bda_handle_t draw = g_draw;
+    if (!draw || (s32)draw == -1) {
+        g_draw = 0;
+        g_draw_owner = 0;
+        return;
+    }
+    g_draw = 0;
+    g_draw_owner = 0;
+    bda_gui_end_draw(draw);
+}
+
+static int acquire_draw_context(bda_handle_t owner)
+{
+    if (g_draw && g_draw_owner == owner)
+        return 1;
+    release_draw_context();
+    g_draw = bda_gui_current_draw(owner);
+    if (!g_draw || (s32)g_draw == -1) {
+        g_draw = 0;
+        return 0;
+    }
+    g_draw_owner = owner;
+    return 1;
+}
+
+static int present_back_rect(int x, int y, int width, int height)
+{
+    void *old_object;
+    int copy_result;
+
+    if (!g_draw || !g_back || !g_draw_object)
+        return 0;
+    (void)bda_gui_draw_guard_begin();
+    old_object = bda_gui_select_draw_object(g_draw, g_draw_object);
+    copy_result = bda_gui_context_copy(
+        g_back, x, y, width, height, g_draw, x, y, 0
+    );
+    (void)bda_gui_select_draw_object(g_draw, old_object);
+    (void)bda_gui_draw_guard_end();
+    return copy_result == 0;
+}
+
+static void draw_selector_names(void)
+{
+    void *old_object;
+    u32 normal;
+    u32 active;
+    u32 row;
+
+    old_object = bda_gui_select_draw_object(g_back, g_draw_object);
+    normal = (u32)bda_gui_rgb_like(g_back, 220, 230, 232);
+    active = (u32)bda_gui_rgb_like(g_back, 255, 255, 255);
+    (void)bda_gui_set_text_mode_like(g_back, 1);
+    for (row = 0; row < SELECTOR_VISIBLE_ROWS; ++row) {
+        u32 game_index = g_selector_top + row;
+        int y = SELECTOR_ROW_TOP + (int)row * SELECTOR_ROW_HEIGHT + 5;
+
+        if (game_index >= g_game_count)
+            break;
+        (void)bda_gui_set_text_color_like(
+            g_back, game_index == g_selected_game ? active : normal
+        );
+        (void)bda_gui_draw_text_like(
+            g_back, 18, y, path_basename(g_game_paths[game_index]), -1
+        );
+    }
+    (void)bda_gui_select_draw_object(g_back, old_object);
+}
+
+static int present_selector(void)
+{
+    int draw_result;
+
+    if (!g_draw || !g_back || !g_draw_object)
+        return 0;
+    render_selector_background();
+    draw_result = bda_gui_draw_vx(g_back, 0, 0, g_screen_vx);
+    draw_selector_names();
+    return draw_result == 0 &&
+           present_back_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+}
+
+static int present_screen(void)
+{
+    int draw_result;
+    int copy_result;
+
+    if (!g_draw || !g_back || !g_draw_object)
+        return 0;
+    if (g_full_redraw) {
+        render_game_screen();
+        draw_result = bda_gui_draw_vx(g_back, 0, 0, g_screen_vx);
+        copy_result = draw_result == 0 ?
+            present_back_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT) : 0;
+        if (draw_result == 0 && copy_result)
+            g_full_redraw = 0;
+        return draw_result == 0 && copy_result;
+    }
+
+    (void)bda_gui_draw_guard_begin();
+    g_lcd_picture.source_pixels = g_buffers.framebuffer;
+    g_lcd_picture.selected_index = -1;
+    {
+        void *old_object = bda_gui_select_draw_object(g_draw, g_draw_object);
+        draw_result = bda_gui_render_picture_like(
+            g_draw, VIEW_X, VIEW_Y, LCD_VX_WIDTH, VIEW_HEIGHT, &g_lcd_picture
+        );
+        (void)bda_gui_select_draw_object(g_draw, old_object);
+    }
+    (void)bda_gui_draw_guard_end();
+    return draw_result == 0;
+}
+
+static int point_in_button(int x, int y, const touch_button_t *button)
+{
+    return x >= button->x && x < button->x + button->width &&
+           y >= button->y && y < button->y + button->height;
+}
+
+static void queue_touch(u32 packed)
+{
+    u32 next = (g_touch_write + 1u) % TOUCH_QUEUE_SIZE;
+    if (next == g_touch_read)
+        return;
+    g_touch_queue[g_touch_write] = packed;
+    g_touch_write = next;
+}
+
+static void set_selected_game(u32 selected)
+{
+    if (selected >= g_game_count || selected == g_selected_game)
+        return;
+    g_selected_game = selected;
+    if (g_selected_game < g_selector_top)
+        g_selector_top = g_selected_game;
+    else if (g_selected_game >= g_selector_top + SELECTOR_VISIBLE_ROWS)
+        g_selector_top = g_selected_game - SELECTOR_VISIBLE_ROWS + 1u;
+    g_selector_redraw = 1;
+}
+
+static void drain_touches(void)
+{
+    while (g_touch_read != g_touch_write) {
+        u32 packed = g_touch_queue[g_touch_read];
+        int x = (s32)(short)(packed & 0xffffu);
+        int y = (s32)(short)(packed >> 16);
+        u32 index;
+
+        g_touch_read = (g_touch_read + 1u) % TOUCH_QUEUE_SIZE;
+        if (g_window_mode == WINDOW_MODE_SELECTOR) {
+            if (x >= 10 && x < 230 && y >= SELECTOR_ROW_TOP) {
+                u32 row = (u32)(y - SELECTOR_ROW_TOP) / SELECTOR_ROW_HEIGHT;
+                u32 game_index = g_selector_top + row;
+
+                if (row < SELECTOR_VISIBLE_ROWS && game_index < g_game_count)
+                    set_selected_game(game_index);
+            }
+            for (index = 0;
+                 index < sizeof(k_selector_buttons) / sizeof(k_selector_buttons[0]);
+                 ++index) {
+                if (!point_in_button(x, y, &k_selector_buttons[index]))
+                    continue;
+                if (k_selector_buttons[index].key == GAM4980_KEY_UP &&
+                    g_selected_game > 0u) {
+                    set_selected_game(g_selected_game - 1u);
+                } else if (k_selector_buttons[index].key == GAM4980_KEY_DOWN &&
+                           g_selected_game + 1u < g_game_count) {
+                    set_selected_game(g_selected_game + 1u);
+                } else if (k_selector_buttons[index].key == GAM4980_KEY_ENTER) {
+                    g_start_requested = 1;
+                }
+                break;
+            }
+            continue;
+        }
+        for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index) {
+            if (point_in_button(x, y, &k_buttons[index])) {
+                gam4980_key_down(k_buttons[index].key);
+                break;
+            }
+        }
+    }
+}
+
+static u32 packet_mask(const bda_gui_input_packet_t *packet)
+{
+    u32 mask = 0;
+    if (packet->bytes[BDA_INPUT_PACKET_RIGHT_INDEX] == 1u) mask |= 1u << 0;
+    if (packet->bytes[BDA_INPUT_PACKET_LEFT_INDEX] == 1u) mask |= 1u << 1;
+    if (packet->bytes[BDA_INPUT_PACKET_DOWN_INDEX] == 1u) mask |= 1u << 2;
+    if (packet->bytes[BDA_INPUT_PACKET_UP_INDEX] == 1u) mask |= 1u << 3;
+    if (packet->bytes[BDA_INPUT_PACKET_ESCAPE_INDEX] == 1u) mask |= 1u << 4;
+    if (packet->bytes[BDA_INPUT_PACKET_ENTER_INDEX] == 1u) mask |= 1u << 5;
+    return mask;
+}
+
+static u8 packet_key(unsigned index)
+{
+    static const u8 keys[6] = {
+        GAM4980_KEY_RIGHT, GAM4980_KEY_LEFT, GAM4980_KEY_DOWN,
+        GAM4980_KEY_UP, GAM4980_KEY_EXIT, GAM4980_KEY_ENTER,
+    };
+    return keys[index];
+}
+
+static int selector_key_repeat(u32 current, u32 pressed, unsigned index)
+{
+    u32 bit = 1u << index;
+
+    if (pressed & bit) {
+        g_hold_frames[index] = 0;
+        return 1;
+    }
+    if (current & bit) {
+        ++g_hold_frames[index];
+        return g_hold_frames[index] >= 12u &&
+               ((g_hold_frames[index] - 12u) % 3u) == 0u;
+    }
+    g_hold_frames[index] = 0;
+    return 0;
+}
+
+static void poll_selector_keys(u32 now)
+{
+    bda_gui_input_packet_t packet;
+    u32 current;
+    u32 pressed;
+    u32 released;
+
+    (void)bda_gui_input_packet(&packet);
+    current = packet_mask(&packet);
+    pressed = current & ~g_previous_keys;
+    released = g_previous_keys & ~current;
+    if (selector_key_repeat(current, pressed, 2u) &&
+        g_selected_game + 1u < g_game_count)
+        set_selected_game(g_selected_game + 1u);
+    if (selector_key_repeat(current, pressed, 3u) && g_selected_game > 0u)
+        set_selected_game(g_selected_game - 1u);
+    if (pressed & (1u << 5))
+        g_start_requested = 1;
+    if (pressed & (1u << 4)) {
+        g_escape_pending = 1;
+        g_escape_down_tick = now;
+    }
+    if (g_escape_pending && (current & (1u << 4)) &&
+        bda_gui_tick_elapsed_25ms(g_escape_down_tick, now) >= ESCAPE_QUIT_TICKS) {
+        log_line("SELECTOR CLOSE");
+        g_close_requested = 1;
+        g_escape_pending = 0;
+    } else if (g_escape_pending && (released & (1u << 4))) {
+        g_escape_pending = 0;
+    }
+    g_previous_keys = current;
+}
+
+static void poll_game_keys(u32 now)
+{
+    bda_gui_input_packet_t packet;
+    u32 current;
+    u32 pressed;
+    u32 released;
+    unsigned index;
+
+    (void)bda_gui_input_packet(&packet);
+    current = packet_mask(&packet);
+    pressed = current & ~g_previous_keys;
+    released = g_previous_keys & ~current;
+
+    for (index = 0; index < 6; ++index) {
+        u32 bit = 1u << index;
+        if (index == 4)
+            continue;
+        if (pressed & bit) {
+            g_hold_frames[index] = 0;
+            gam4980_key_down(packet_key(index));
+        } else if (current & bit) {
+            ++g_hold_frames[index];
+            if (g_hold_frames[index] >= 12u &&
+                ((g_hold_frames[index] - 12u) % 3u) == 0u)
+                gam4980_key_down(packet_key(index));
+        } else {
+            g_hold_frames[index] = 0;
+        }
+    }
+
+    if (pressed & (1u << 4)) {
+        g_escape_pending = 1;
+        g_escape_down_tick = now;
+    }
+    if (g_escape_pending && (current & (1u << 4)) &&
+        bda_gui_tick_elapsed_25ms(g_escape_down_tick, now) >= ESCAPE_QUIT_TICKS) {
+        g_close_requested = 1;
+        g_escape_pending = 0;
+    } else if (g_escape_pending && (released & (1u << 4))) {
+        gam4980_key_down(GAM4980_KEY_EXIT);
+        g_escape_pending = 0;
+    }
+    g_previous_keys = current;
+}
+
+static int gam_window_proc(bda_handle_t handle, u32 message, u32 wparam, u32 lparam)
+{
+    if (message == BDA_MSG_DRAW_CONTEXT_ATTACH) {
+        g_frame = handle;
+        (void)acquire_draw_context(handle);
+        if (!g_draw_object)
+            g_draw_object = bda_gui_draw_object_create(7);
+        g_full_redraw = 1;
+        g_selector_redraw = 1;
+    } else if (message == BDA_MSG_DRAW_CONTEXT_DETACH) {
+        if (!g_draw_owner || g_draw_owner == handle)
+            release_draw_context();
+        g_detached = 1;
+    }
+    if (message == BDA_MSG_TOUCH_RELEASE) {
+        queue_touch(lparam);
+        return 1;
+    }
+    if (message == BDA_MSG_TOUCH_COORDINATE)
+        return 1;
+    return bda_gui_default_proc(handle, message, wparam, lparam);
+}
+
+static int start_selected_game(void)
+{
+    if (g_selected_game >= g_game_count)
+        return 0;
+    copy_text(g_game_path, g_game_paths[g_selected_game], sizeof(g_game_path));
+    if (load_game(g_game_path) <= 0) {
+        bda_msgbox(k_window_title, "The selected .gam file is invalid or unreadable.");
+        g_start_requested = 0;
+        g_selector_redraw = 1;
+        return 0;
+    }
+    log_line("GAME SELECTED");
+    log_line(g_game_path);
+    log_hex_value("GAME SIZE=", g_loaded_game_size);
+    g_window_mode = WINDOW_MODE_GAME;
+    g_start_requested = 0;
+    g_full_redraw = 1;
+    g_escape_pending = 0;
+    g_frame_count = 0;
+    g_core_frame_phase = 0;
+    bda_memset(g_hold_frames, 0, sizeof(g_hold_frames));
+    return 1;
+}
+
+static int run_window(void)
+{
+    bda_frame_desc_t descriptor;
+    bda_gui_message_t message;
+    bda_gui_input_packet_t initial_packet;
+    u32 last_frame_tick;
+    u32 last_save_tick;
+    u32 close_wait = 0;
+    int window_ok = 0;
+
+    bda_memset(&descriptor, 0, sizeof(descriptor));
+    bda_memset(&message, 0, sizeof(message));
+    bda_memset(g_touch_queue, 0, sizeof(g_touch_queue));
+    bda_memset(g_hold_frames, 0, sizeof(g_hold_frames));
+    g_frame = 0;
+    g_draw = 0;
+    g_draw_owner = 0;
+    g_back = 0;
+    g_draw_object = 0;
+    g_touch_read = 0;
+    g_touch_write = 0;
+    g_detached = 0;
+    g_previous_keys = 0;
+    g_window_mode = g_loaded_game_size ? WINDOW_MODE_GAME : WINDOW_MODE_SELECTOR;
+    g_full_redraw = 1;
+    g_selector_redraw = 1;
+    g_start_requested = 0;
+    g_escape_pending = 0;
+    g_close_requested = 0;
+    g_frame_count = 0;
+    g_core_frame_phase = 0;
+    g_core_break_logged = 0;
+
+    descriptor.style = 0;
+    descriptor.title = k_window_title;
+    descriptor.wndproc = gam_window_proc;
+    descriptor.height = SCREEN_WIDTH;
+    descriptor.width = SCREEN_HEIGHT;
+    g_frame = bda_gui_register_frame_desc(&descriptor);
+    if (!g_frame || (s32)g_frame == -1)
+        goto cleanup;
+    (void)bda_gui_frame_activate(g_frame, 0x100);
+    (void)acquire_draw_context(g_frame);
+    g_draw_object = bda_gui_draw_object_create(7);
+    if (!g_draw || !g_draw_object || (s32)(u32)g_draw_object == -1)
+        goto cleanup;
+    g_back = bda_gui_compatible_context_create(g_draw);
+    if (!g_back || (s32)g_back == -1)
+        goto cleanup;
+
+    last_frame_tick = bda_gui_tick_count_25ms() - 1u;
+    last_save_tick = last_frame_tick;
+    (void)bda_gui_input_packet(&initial_packet);
+    g_previous_keys = packet_mask(&initial_packet);
+    log_line("WINDOW START");
+    window_ok = 1;
+    for (;;) {
+        int pump_result = bda_gui_event_pump_frame_once(&message, g_frame);
+        u32 now = bda_gui_tick_count_25ms();
+        u32 elapsed_ticks = bda_gui_tick_elapsed_25ms(last_frame_tick, now);
+
+        drain_touches();
+        if (!g_close_requested && elapsed_ticks >= 1u) {
+            last_frame_tick = now;
+            if (elapsed_ticks > MAX_CATCHUP_TICKS)
+                elapsed_ticks = MAX_CATCHUP_TICKS;
+            if (g_window_mode == WINDOW_MODE_SELECTOR) {
+                poll_selector_keys(now);
+                if (g_start_requested && start_selected_game()) {
+                    last_save_tick = now;
+                }
+                if (g_window_mode == WINDOW_MODE_SELECTOR && g_selector_redraw) {
+                    if (present_selector())
+                        g_selector_redraw = 0;
+                    else
+                        log_line("SELECTOR PRESENT FAILED");
+                }
+            } else {
+                int lcd_changed;
+
+                poll_game_keys(now);
+                g_core_frame_phase += elapsed_ticks * 60u;
+                while (g_core_frame_phase >= 40u) {
+                    gam4980_step_frame();
+                    g_core_frame_phase -= 40u;
+                }
+                lcd_changed = gam4980_render_frame();
+                g_frame_count += elapsed_ticks;
+                if (g_full_redraw || lcd_changed) {
+                    if (!present_screen())
+                        log_line("PRESENT FAILED");
+                }
+            }
+        }
+        if (g_window_mode == WINDOW_MODE_GAME && !g_close_requested &&
+            bda_gui_tick_elapsed_25ms(last_save_tick, now) >= SAVE_INTERVAL_TICKS) {
+            write_save();
+            last_save_tick = now;
+        }
+        if (g_window_mode == WINDOW_MODE_GAME &&
+            gam4980_shutdown_requested() && !g_core_break_logged) {
+            log_hex_value("CORE BRK PC=", gam4980_shutdown_pc());
+            log_hex_value("CORE FRAME=", g_frame_count);
+            g_core_break_logged = 1;
+        }
+        if (g_close_requested && close_wait == 0) {
+            if (g_window_mode == WINDOW_MODE_GAME)
+                write_save();
+            (void)bda_gui_frame_stop(g_frame);
+            (void)bda_gui_frame_release(g_frame);
+        }
+        bda_sys_delay(1);
+        if (g_close_requested) {
+            ++close_wait;
+            if (!pump_result || g_detached || close_wait >= 128u)
+                break;
+        }
+    }
+    log_line("WINDOW END");
+
+cleanup:
+    if (g_back && (s32)g_back != -1) {
+        bda_gui_compatible_context_free(g_back);
+        g_back = 0;
+    }
+    release_draw_context();
+    if (g_frame) {
+        bda_gui_close_frame(g_frame);
+        g_frame = 0;
+    }
+    return window_ok;
+}
+
+__attribute__((section(".text.bda_main")))
+int bda_main(void)
+{
+    int result = 0;
+
+    (void)bda_fs_mkdir_like(k_data_dir);
+    reset_log();
+    log_line("START STANDALONE");
+    g_game_path[0] = 0;
+    g_save_path[0] = 0;
+    g_loaded_game_size = 0;
+    if (!scan_games()) {
+        bda_msgbox(k_window_title, "No .gam files were found in the gam4980 data folder.");
+        result = -1;
+        goto cleanup;
+    }
+    log_hex_value("GAMES FOUND=", g_game_count);
+    if (!allocate_buffers()) {
+        bda_msgbox(k_window_title, "Not enough memory (requires about 6.2 MiB).");
+        result = -2;
+        goto cleanup;
+    }
+    if (!load_fixed_file(k_rom_8_path, g_buffers.rom_8, GAM4980_ROM_SIZE)) {
+        bda_msgbox(k_window_title, "Missing or invalid 8.BIN in application data.");
+        result = -3;
+        goto cleanup;
+    }
+    if (!load_fixed_file(k_rom_e_path, g_buffers.rom_e, GAM4980_ROM_SIZE)) {
+        bda_msgbox(k_window_title, "Missing or invalid E.BIN in application data.");
+        result = -4;
+        goto cleanup;
+    }
+    if (gam4980_init(&g_buffers) <= 0) {
+        bda_msgbox(k_window_title, "Firmware initialization failed.");
+        result = -5;
+        goto cleanup;
+    }
+    if (g_game_count == 1u && !start_selected_game()) {
+        result = -6;
+        goto cleanup;
+    }
+    if (!run_window()) {
+        bda_msgbox(k_window_title, "Could not create the emulator window.");
+        result = -7;
+    }
+
+cleanup:
+    log_line("END");
+    release_buffers();
+    return result;
+}
+
+/* Single translation unit: the upstream-derived core includes s6502.c. */
+#include "gam4980_core.c"
