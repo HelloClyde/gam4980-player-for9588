@@ -18,13 +18,14 @@ void *memset(void *destination, int value, bda_size_t size)
 #define SCREEN_HEIGHT 320
 #define VX_HEADER_SIZE 24u
 #define SCREEN_VX_BYTES (VX_HEADER_SIZE + SCREEN_WIDTH * SCREEN_HEIGHT * 2u)
-#define LCD_VX_WIDTH (GAM4980_LCD_WIDTH + 1)
-#define CORE_FRAME_BYTES ((GAM4980_LCD_WIDTH + 1u) * GAM4980_LCD_HEIGHT * 2u)
+#define LCD_SOURCE_WIDTH (GAM4980_LCD_WIDTH + 1)
+#define CORE_FRAME_BYTES (LCD_SOURCE_WIDTH * GAM4980_LCD_HEIGHT * 2u)
 
-#define VIEW_X 40
-#define VIEW_Y 30
-#define VIEW_WIDTH GAM4980_LCD_WIDTH
-#define VIEW_HEIGHT GAM4980_LCD_HEIGHT
+#define VIEW_X 0
+#define VIEW_Y 9
+#define VIEW_WIDTH SCREEN_WIDTH
+#define VIEW_HEIGHT 145
+#define VIEW_FRAME_BYTES (VIEW_WIDTH * VIEW_HEIGHT * 2u)
 
 #define TOUCH_QUEUE_SIZE 16u
 #define ESCAPE_QUIT_TICKS 40u
@@ -87,6 +88,7 @@ static const u8 k_font[36][7] = {
 static gam4980_buffers_t g_buffers;
 static bda_file_selector_t g_file_selector;
 static bda_gui_picture_t g_lcd_picture;
+static u16 *g_scaled_framebuffer;
 static u8 *g_screen_vx;
 static bda_handle_t g_frame;
 static bda_handle_t g_draw;
@@ -97,6 +99,8 @@ static u32 g_touch_queue[TOUCH_QUEUE_SIZE];
 static volatile u32 g_touch_read;
 static volatile u32 g_touch_write;
 static volatile int g_detached;
+static u8 g_scale_x[VIEW_WIDTH];
+static u8 g_scale_y[VIEW_HEIGHT];
 static char g_save_path[160];
 static u32 g_previous_keys;
 static u32 g_hold_frames[6];
@@ -176,6 +180,8 @@ static void release_buffers(void)
     gam4980_deinit();
     if (valid_pointer(g_screen_vx))
         bda_free(g_screen_vx);
+    if (valid_pointer(g_scaled_framebuffer))
+        bda_free(g_scaled_framebuffer);
     if (valid_pointer(g_buffers.framebuffer))
         bda_free(g_buffers.framebuffer);
     if (valid_pointer(g_buffers.ram))
@@ -187,12 +193,14 @@ static void release_buffers(void)
     if (valid_pointer(g_buffers.rom_e))
         bda_free(g_buffers.rom_e);
     bda_memset(&g_buffers, 0, sizeof(g_buffers));
+    g_scaled_framebuffer = 0;
     g_screen_vx = 0;
 }
 
 static int allocate_buffers(void)
 {
     bda_memset(&g_buffers, 0, sizeof(g_buffers));
+    g_scaled_framebuffer = 0;
     g_screen_vx = 0;
 
     g_buffers.ram = (u8 *)bda_alloc(GAM4980_RAM_SIZE);
@@ -200,17 +208,27 @@ static int allocate_buffers(void)
     g_buffers.rom_8 = (u8 *)bda_alloc(GAM4980_ROM_SIZE);
     g_buffers.rom_e = (u8 *)bda_alloc(GAM4980_ROM_SIZE);
     g_buffers.framebuffer = (u16 *)bda_alloc(CORE_FRAME_BYTES);
+    g_scaled_framebuffer = (u16 *)bda_alloc(VIEW_FRAME_BYTES);
     g_screen_vx = (u8 *)bda_alloc(SCREEN_VX_BYTES);
     if (!valid_pointer(g_buffers.ram) || !valid_pointer(g_buffers.flash) ||
         !valid_pointer(g_buffers.rom_8) || !valid_pointer(g_buffers.rom_e) ||
-        !valid_pointer(g_buffers.framebuffer) || !valid_pointer(g_screen_vx)) {
+        !valid_pointer(g_buffers.framebuffer) ||
+        !valid_pointer(g_scaled_framebuffer) || !valid_pointer(g_screen_vx)) {
         release_buffers();
         return 0;
     }
+    {
+        u32 index;
+        /* Map the active 159x96 LCD; the 160th source pixel is stride padding. */
+        for (index = 0; index < VIEW_WIDTH; ++index)
+            g_scale_x[index] = (u8)(index * GAM4980_LCD_WIDTH / VIEW_WIDTH);
+        for (index = 0; index < VIEW_HEIGHT; ++index)
+            g_scale_y[index] = (u8)(index * GAM4980_LCD_HEIGHT / VIEW_HEIGHT);
+    }
     bda_memset(&g_lcd_picture, 0, sizeof(g_lcd_picture));
-    g_lcd_picture.width = LCD_VX_WIDTH;
+    g_lcd_picture.width = VIEW_WIDTH;
     g_lcd_picture.height = VIEW_HEIGHT;
-    g_lcd_picture.source_pixels = g_buffers.framebuffer;
+    g_lcd_picture.source_pixels = g_scaled_framebuffer;
     g_lcd_picture.selected_index = -1;
     return 1;
 }
@@ -424,19 +442,6 @@ static void fill_rect(int x, int y, int width, int height, u16 color)
             put_pixel(px, py, color);
 }
 
-static void frame_rect(int x, int y, int width, int height, u16 color)
-{
-    int index;
-    for (index = 0; index < width; ++index) {
-        put_pixel(x + index, y, color);
-        put_pixel(x + index, y + height - 1, color);
-    }
-    for (index = 1; index + 1 < height; ++index) {
-        put_pixel(x, y + index, color);
-        put_pixel(x + width - 1, y + index, color);
-    }
-}
-
 static int glyph_index(char character)
 {
     if (character >= '0' && character <= '9')
@@ -516,16 +521,29 @@ static void draw_button(const touch_button_t *button)
     }
 }
 
-static void copy_lcd_to_full_vx(void)
+static void scale_lcd_to_view(void)
 {
     const u16 *source = gam4980_framebuffer();
     int y;
 
     for (y = 0; y < VIEW_HEIGHT; ++y) {
+        const u16 *source_row = source + g_scale_y[y] * LCD_SOURCE_WIDTH;
+        u16 *destination = g_scaled_framebuffer + y * VIEW_WIDTH;
+        int x;
+
+        for (x = 0; x < VIEW_WIDTH; ++x)
+            destination[x] = source_row[g_scale_x[x]];
+    }
+}
+
+static void copy_lcd_to_full_vx(void)
+{
+    int y;
+
+    for (y = 0; y < VIEW_HEIGHT; ++y) {
         u8 *destination = g_screen_vx + VX_HEADER_SIZE +
             (u32)((VIEW_Y + y) * SCREEN_WIDTH + VIEW_X) * 2u;
-        bda_memcpy(destination,
-                   source + y * (GAM4980_LCD_WIDTH + 1),
+        bda_memcpy(destination, g_scaled_framebuffer + y * VIEW_WIDTH,
                    VIEW_WIDTH * 2u);
     }
 }
@@ -538,9 +556,10 @@ static void render_game_screen(void)
 
     init_full_vx();
     fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, background);
-    fill_rect(VIEW_X - 2, VIEW_Y - 2, VIEW_WIDTH + 4, VIEW_HEIGHT + 4, frame);
-    frame_rect(VIEW_X - 3, VIEW_Y - 3, VIEW_WIDTH + 6, VIEW_HEIGHT + 6,
-               rgb565(36, 55, 63));
+    fill_rect(0, VIEW_Y - 3, SCREEN_WIDTH, VIEW_HEIGHT + 6,
+              rgb565(36, 55, 63));
+    fill_rect(0, VIEW_Y - 2, SCREEN_WIDTH, VIEW_HEIGHT + 4, frame);
+    scale_lcd_to_view();
     copy_lcd_to_full_vx();
     for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index)
         draw_button(&k_buttons[index]);
@@ -608,12 +627,13 @@ static int present_screen(void)
     }
 
     (void)bda_gui_draw_guard_begin();
-    g_lcd_picture.source_pixels = g_buffers.framebuffer;
+    scale_lcd_to_view();
+    g_lcd_picture.source_pixels = g_scaled_framebuffer;
     g_lcd_picture.selected_index = -1;
     {
         void *old_object = bda_gui_select_draw_object(g_draw, g_draw_object);
         draw_result = bda_gui_render_picture(
-            g_draw, VIEW_X, VIEW_Y, LCD_VX_WIDTH, VIEW_HEIGHT, &g_lcd_picture
+            g_draw, VIEW_X, VIEW_Y, VIEW_WIDTH, VIEW_HEIGHT, &g_lcd_picture
         );
         (void)bda_gui_select_draw_object(g_draw, old_object);
     }
@@ -884,7 +904,7 @@ int bda_main(void)
     log_line("GAME SELECTED");
     log_line(g_file_selector.path);
     if (!allocate_buffers()) {
-        bda_msgbox(k_window_title, "Not enough memory (requires about 6.2 MiB).");
+        bda_msgbox(k_window_title, "Not enough memory (requires about 6.3 MiB).");
         result = -2;
         goto cleanup;
     }

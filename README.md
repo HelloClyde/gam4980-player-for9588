@@ -53,14 +53,23 @@ game-sized heap buffer is not required.
   emulated time or drawing every intermediate frame.
 - LCD RAM writes set a dirty flag. Unchanged frames skip both RGB565 conversion
   and GUI submission.
+- The active 159x96 LCD is nearest-neighbor scaled in software to 240x145 using
+  coordinate maps computed once at startup. The scaled RGB565 buffer is then
+  submitted at its native descriptor size through the formal picture API; the
+  application does not depend on unverified firmware picture scaling.
 - Changed LCD frames are submitted directly to the visible draw context under
   the firmware draw guard. The full 240x320 interface is drawn only when the
-  game view is first created; later updates cover only the native 159x96 LCD.
+  game view is first created; later updates cover only the 240x145 LCD view.
 - The LCD unpacker uses a 16-entry nibble lookup table and aligned 32-bit stores.
 - HALT periods are advanced to the next timer event instead of interpreting idle
   CPU cycles one instruction at a time.
 - Save flash is written to the filesystem only after the emulated save region
   has actually changed.
+
+An 8013 emulator A/B run advanced the same game through the same 30-input
+sequence in about 23.3 seconds. The 240x145 build executed 0.4% fewer guest
+instructions and submitted 97 changed GUI frames versus 105 at native size.
+This is an emulator comparison, not a physical-device benchmark.
 
 ## Controls
 
