@@ -80,6 +80,8 @@ SECTIONS
                 "-mno-abicalls",
                 "-G0",
                 "-fno-pic",
+                # The verified firmware heap call does not preserve $fp/$s8.
+                "-ffixed-fp",
                 "-Os",
                 "-fomit-frame-pointer",
                 "-fno-strict-aliasing",

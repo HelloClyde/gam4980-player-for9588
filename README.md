@@ -53,13 +53,17 @@ game-sized heap buffer is not required.
   emulated time or drawing every intermediate frame.
 - LCD RAM writes set a dirty flag. Unchanged frames skip both RGB565 conversion
   and GUI submission.
-- The active 159x96 LCD is nearest-neighbor scaled in software to 240x145 using
-  coordinate maps computed once at startup. The scaled RGB565 buffer is then
-  submitted at its native descriptor size through the formal picture API; the
-  application does not depend on unverified firmware picture scaling.
+- The active 159x96 LCD is scaled in software to 240x145. A settings button
+  between the LCD and touch controls selects nearest-neighbor, bilinear, or
+  native-resolution display. Bilinear is the default. Native mode centers the
+  unscaled 159x96 image inside the 240x145 view. Coordinate maps for the scaled
+  modes are computed once at startup, and every RGB565 buffer is submitted at
+  its native descriptor size through the formal picture API; the application
+  does not depend on unverified firmware picture scaling.
 - Changed LCD frames are submitted directly to the visible draw context under
-  the firmware draw guard. The full 240x320 interface is drawn only when the
-  game view is first created; later updates cover only the 240x145 LCD view.
+  the firmware draw guard. The full 240x320 RGB565 interface is submitted when
+  the view is created or settings change; ordinary updates cover only the
+  240x145 LCD view.
 - The LCD unpacker uses a 16-entry nibble lookup table and aligned 32-bit stores.
 - HALT periods are advanced to the next timer event instead of interpreting idle
   CPU cycles one instruction at a time.
@@ -78,6 +82,16 @@ This is an emulator comparison, not a physical-device benchmark.
 - Escape (short press): emulated Exit
 - Escape (hold for one second): close the emulator
 - Touch controls: direction pad, Enter, Exit, Page Up, and Page Down
+- Settings: touch the gear button; use Up/Down and Enter in the settings panel,
+  or touch an algorithm row. The panel's X button closes it without changing.
+
+The selected scaling algorithm is stored at:
+
+```text
+A:\应用\数据\游戏\gam4980\GAM4980.CFG
+```
+
+Missing or invalid configuration files fall back to bilinear scaling.
 
 Save data is written under `A:\应用\数据\游戏\gam4980` using a game-specific
 hash filename.

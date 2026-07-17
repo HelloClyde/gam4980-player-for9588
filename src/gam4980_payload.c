@@ -16,8 +16,7 @@ void *memset(void *destination, int value, bda_size_t size)
 
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 320
-#define VX_HEADER_SIZE 24u
-#define SCREEN_VX_BYTES (VX_HEADER_SIZE + SCREEN_WIDTH * SCREEN_HEIGHT * 2u)
+#define SCREEN_FRAME_BYTES (SCREEN_WIDTH * SCREEN_HEIGHT * 2u)
 #define LCD_SOURCE_WIDTH (GAM4980_LCD_WIDTH + 1)
 #define CORE_FRAME_BYTES (LCD_SOURCE_WIDTH * GAM4980_LCD_HEIGHT * 2u)
 
@@ -26,6 +25,8 @@ void *memset(void *destination, int value, bda_size_t size)
 #define VIEW_WIDTH SCREEN_WIDTH
 #define VIEW_HEIGHT 145
 #define VIEW_FRAME_BYTES (VIEW_WIDTH * VIEW_HEIGHT * 2u)
+#define SETTINGS_ROW_Y 159
+#define SETTINGS_ROW_HEIGHT 22
 
 #define TOUCH_QUEUE_SIZE 16u
 #define ESCAPE_QUIT_TICKS 40u
@@ -41,6 +42,25 @@ typedef struct touch_button {
     const char *label;
 } touch_button_t;
 
+typedef struct ui_rect {
+    s32 x;
+    s32 y;
+    s32 width;
+    s32 height;
+} ui_rect_t;
+
+typedef struct scale_axis_sample {
+    u16 index;
+    u16 weight;
+} scale_axis_sample_t;
+
+enum scaling_algorithm {
+    SCALE_NEAREST = 0,
+    SCALE_BILINEAR = 1,
+    SCALE_NATIVE = 2,
+    SCALE_ALGORITHM_COUNT = 3,
+};
+
 static const char k_window_title[] = "GAM4980";
 static const char k_game_dir[] = "A:\\gam4980";
 static const char k_game_selector_path[] = "A:\\gam4980\\";
@@ -52,16 +72,29 @@ static const char k_rom_e_path[] =
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\E.BIN";
 static const char k_log_path[] =
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\GAM4980.LOG";
+static const char k_config_path[] =
+    "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\GAM4980.CFG";
 
 static const touch_button_t k_buttons[] = {
-    { 54, 166, 42, 42, GAM4980_KEY_UP, 0 },
-    { 10, 210, 42, 42, GAM4980_KEY_LEFT, 0 },
-    { 98, 210, 42, 42, GAM4980_KEY_RIGHT, 0 },
-    { 54, 254, 42, 42, GAM4980_KEY_DOWN, 0 },
-    { 150, 166, 82, 54, GAM4980_KEY_ENTER, "ENTER" },
-    { 150, 228, 82, 42, GAM4980_KEY_EXIT, "EXIT" },
-    { 150, 278, 38, 34, GAM4980_KEY_PAGE_UP, "PGUP" },
-    { 194, 278, 38, 34, GAM4980_KEY_PAGE_DOWN, "PGDN" },
+    { 52, 185, 38, 38, GAM4980_KEY_UP, 0 },
+    { 12, 225, 38, 38, GAM4980_KEY_LEFT, 0 },
+    { 92, 225, 38, 38, GAM4980_KEY_RIGHT, 0 },
+    { 52, 265, 38, 38, GAM4980_KEY_DOWN, 0 },
+    { 148, 185, 84, 43, GAM4980_KEY_ENTER, "ENTER" },
+    { 148, 232, 84, 34, GAM4980_KEY_EXIT, "EXIT" },
+    { 148, 270, 40, 34, GAM4980_KEY_PAGE_UP, "PGUP" },
+    { 192, 270, 40, 34, GAM4980_KEY_PAGE_DOWN, "PGDN" },
+};
+
+static const ui_rect_t k_settings_button = { 204, SETTINGS_ROW_Y, 28, 22 };
+static const ui_rect_t k_settings_close = { 196, 72, 22, 22 };
+static const ui_rect_t k_settings_options[SCALE_ALGORITHM_COUNT] = {
+    { 28, 108, 184, 34 },
+    { 28, 151, 184, 34 },
+    { 28, 194, 184, 34 },
+};
+static const char *const k_algorithm_names[SCALE_ALGORITHM_COUNT] = {
+    "NEAREST", "BILINEAR", "NATIVE",
 };
 
 static const u8 k_font[36][7] = {
@@ -88,19 +121,21 @@ static const u8 k_font[36][7] = {
 static gam4980_buffers_t g_buffers;
 static bda_file_selector_t g_file_selector;
 static bda_gui_picture_t g_lcd_picture;
+static bda_gui_picture_t g_full_picture;
 static u16 *g_scaled_framebuffer;
-static u8 *g_screen_vx;
+static u16 *g_screen_pixels;
 static bda_handle_t g_frame;
 static bda_handle_t g_draw;
 static bda_handle_t g_draw_owner;
-static bda_handle_t g_back;
 static void *g_draw_object;
 static u32 g_touch_queue[TOUCH_QUEUE_SIZE];
 static volatile u32 g_touch_read;
 static volatile u32 g_touch_write;
 static volatile int g_detached;
-static u8 g_scale_x[VIEW_WIDTH];
-static u8 g_scale_y[VIEW_HEIGHT];
+static u8 g_nearest_x[VIEW_WIDTH];
+static u8 g_nearest_y[VIEW_HEIGHT];
+static scale_axis_sample_t g_bilinear_x[VIEW_WIDTH];
+static scale_axis_sample_t g_bilinear_y[VIEW_HEIGHT];
 static char g_save_path[160];
 static u32 g_previous_keys;
 static u32 g_hold_frames[6];
@@ -112,6 +147,10 @@ static int g_full_redraw;
 static int g_escape_pending;
 static int g_close_requested;
 static int g_core_break_logged;
+static int g_scale_algorithm = SCALE_BILINEAR;
+static int g_settings_open;
+static int g_settings_selection;
+static int g_settings_key_release_ticks;
 
 static void copy_text(char *out, const char *text, u32 capacity)
 {
@@ -175,11 +214,25 @@ static int valid_pointer(const void *pointer)
     return pointer && (s32)(u32)pointer != -1;
 }
 
+static void init_bilinear_axis(
+    scale_axis_sample_t *samples, u32 destination_size, u32 source_size
+)
+{
+    u32 index;
+
+    for (index = 0; index < destination_size; ++index) {
+        u32 fixed = index * (source_size - 1u) * 256u /
+                    (destination_size - 1u);
+        samples[index].index = (u16)(fixed >> 8);
+        samples[index].weight = (u16)(fixed & 0xffu);
+    }
+}
+
 static void release_buffers(void)
 {
     gam4980_deinit();
-    if (valid_pointer(g_screen_vx))
-        bda_free(g_screen_vx);
+    if (valid_pointer(g_screen_pixels))
+        bda_free(g_screen_pixels);
     if (valid_pointer(g_scaled_framebuffer))
         bda_free(g_scaled_framebuffer);
     if (valid_pointer(g_buffers.framebuffer))
@@ -194,14 +247,14 @@ static void release_buffers(void)
         bda_free(g_buffers.rom_e);
     bda_memset(&g_buffers, 0, sizeof(g_buffers));
     g_scaled_framebuffer = 0;
-    g_screen_vx = 0;
+    g_screen_pixels = 0;
 }
 
 static int allocate_buffers(void)
 {
     bda_memset(&g_buffers, 0, sizeof(g_buffers));
     g_scaled_framebuffer = 0;
-    g_screen_vx = 0;
+    g_screen_pixels = 0;
 
     g_buffers.ram = (u8 *)bda_alloc(GAM4980_RAM_SIZE);
     g_buffers.flash = (u8 *)bda_alloc(GAM4980_FLASH_SIZE);
@@ -209,11 +262,12 @@ static int allocate_buffers(void)
     g_buffers.rom_e = (u8 *)bda_alloc(GAM4980_ROM_SIZE);
     g_buffers.framebuffer = (u16 *)bda_alloc(CORE_FRAME_BYTES);
     g_scaled_framebuffer = (u16 *)bda_alloc(VIEW_FRAME_BYTES);
-    g_screen_vx = (u8 *)bda_alloc(SCREEN_VX_BYTES);
+    g_screen_pixels = (u16 *)bda_alloc(SCREEN_FRAME_BYTES);
     if (!valid_pointer(g_buffers.ram) || !valid_pointer(g_buffers.flash) ||
         !valid_pointer(g_buffers.rom_8) || !valid_pointer(g_buffers.rom_e) ||
         !valid_pointer(g_buffers.framebuffer) ||
-        !valid_pointer(g_scaled_framebuffer) || !valid_pointer(g_screen_vx)) {
+        !valid_pointer(g_scaled_framebuffer) ||
+        !valid_pointer(g_screen_pixels)) {
         release_buffers();
         return 0;
     }
@@ -221,15 +275,28 @@ static int allocate_buffers(void)
         u32 index;
         /* Map the active 159x96 LCD; the 160th source pixel is stride padding. */
         for (index = 0; index < VIEW_WIDTH; ++index)
-            g_scale_x[index] = (u8)(index * GAM4980_LCD_WIDTH / VIEW_WIDTH);
+            g_nearest_x[index] =
+                (u8)(index * GAM4980_LCD_WIDTH / VIEW_WIDTH);
         for (index = 0; index < VIEW_HEIGHT; ++index)
-            g_scale_y[index] = (u8)(index * GAM4980_LCD_HEIGHT / VIEW_HEIGHT);
+            g_nearest_y[index] =
+                (u8)(index * GAM4980_LCD_HEIGHT / VIEW_HEIGHT);
     }
+    init_bilinear_axis(
+        g_bilinear_x, VIEW_WIDTH, GAM4980_LCD_WIDTH
+    );
+    init_bilinear_axis(
+        g_bilinear_y, VIEW_HEIGHT, GAM4980_LCD_HEIGHT
+    );
     bda_memset(&g_lcd_picture, 0, sizeof(g_lcd_picture));
     g_lcd_picture.width = VIEW_WIDTH;
     g_lcd_picture.height = VIEW_HEIGHT;
     g_lcd_picture.source_pixels = g_scaled_framebuffer;
     g_lcd_picture.selected_index = -1;
+    bda_memset(&g_full_picture, 0, sizeof(g_full_picture));
+    g_full_picture.width = SCREEN_WIDTH;
+    g_full_picture.height = SCREEN_HEIGHT;
+    g_full_picture.source_pixels = g_screen_pixels;
+    g_full_picture.selected_index = -1;
     return 1;
 }
 
@@ -257,6 +324,40 @@ static int write_exact(int file, const u8 *data, u32 size)
         total += (u32)wrote;
     }
     return 1;
+}
+
+static void load_scaling_config(void)
+{
+    u8 data[8];
+    int file;
+
+    g_scale_algorithm = SCALE_BILINEAR;
+    file = bda_fs_fopen_raw(k_config_path, "rb");
+    if (!bda_fs_file_is_valid(file))
+        return;
+    if (read_exact(file, data, sizeof(data)) &&
+        data[0] == 'G' && data[1] == '4' &&
+        data[2] == 'S' && data[3] == '1' &&
+        data[4] < SCALE_ALGORITHM_COUNT) {
+        g_scale_algorithm = data[4];
+    }
+    (void)bda_fs_close_raw(file);
+}
+
+static void write_scaling_config(void)
+{
+    u8 data[8] = { 'G', '4', 'S', '1', 0, 0, 0, 0 };
+    int file;
+
+    data[4] = (u8)g_scale_algorithm;
+    file = bda_fs_fopen_raw(k_config_path, "wb");
+    if (!bda_fs_file_is_valid(file)) {
+        log_line("CONFIG OPEN FAILED");
+        return;
+    }
+    if (!write_exact(file, data, sizeof(data)))
+        log_line("CONFIG WRITE FAILED");
+    (void)bda_fs_close_raw(file);
 }
 
 static int load_fixed_file(const char *path, u8 *out, u32 expected_size)
@@ -382,64 +483,27 @@ static int load_game(const char *path)
     return 1;
 }
 
-static void write_u16_le(u8 *out, u16 value)
-{
-    out[0] = (u8)value;
-    out[1] = (u8)(value >> 8);
-}
-
-static void write_u32_le(u8 *out, u32 value)
-{
-    out[0] = (u8)value;
-    out[1] = (u8)(value >> 8);
-    out[2] = (u8)(value >> 16);
-    out[3] = (u8)(value >> 24);
-}
-
 static u16 rgb565(u32 red, u32 green, u32 blue)
 {
     return (u16)(((red & 0xf8u) << 8) | ((green & 0xfcu) << 3) | (blue >> 3));
 }
 
-static void write_vx_header(u8 *image, u32 width, u32 height)
-{
-    int index;
-
-    bda_memset(image, 0, VX_HEADER_SIZE);
-    image[0] = 'V';
-    image[1] = 'X';
-    for (index = 2; index < 6; ++index)
-        image[index] = 0xcc;
-    write_u32_le(image + 6, width);
-    write_u32_le(image + 10, height);
-    for (index = 14; index < 20; ++index)
-        image[index] = 0xcc;
-    for (index = 20; index < (int)VX_HEADER_SIZE; ++index)
-        image[index] = 0xff;
-}
-
-static void init_full_vx(void)
-{
-    bda_memset(g_screen_vx, 0, SCREEN_VX_BYTES);
-    write_vx_header(g_screen_vx, SCREEN_WIDTH, SCREEN_HEIGHT);
-}
-
-static void put_pixel(int x, int y, u16 color)
-{
-    u32 offset;
-    if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT)
-        return;
-    offset = VX_HEADER_SIZE + (u32)(y * SCREEN_WIDTH + x) * 2u;
-    write_u16_le(g_screen_vx + offset, color);
-}
-
 static void fill_rect(int x, int y, int width, int height, u16 color)
 {
-    int px;
+    int left = x < 0 ? 0 : x;
+    int top = y < 0 ? 0 : y;
+    int right = x + width > SCREEN_WIDTH ? SCREEN_WIDTH : x + width;
+    int bottom = y + height > SCREEN_HEIGHT ? SCREEN_HEIGHT : y + height;
     int py;
-    for (py = y; py < y + height; ++py)
-        for (px = x; px < x + width; ++px)
-            put_pixel(px, py, color);
+
+    if (left >= right || top >= bottom)
+        return;
+    for (py = top; py < bottom; ++py) {
+        u16 *pixel = g_screen_pixels + py * SCREEN_WIDTH + left;
+        u16 *end = pixel + (right - left);
+        while (pixel < end)
+            *pixel++ = color;
+    }
 }
 
 static int glyph_index(char character)
@@ -521,28 +585,216 @@ static void draw_button(const touch_button_t *button)
     }
 }
 
+static void draw_gear_icon(int center_x, int center_y, u16 color, u16 hole)
+{
+    fill_rect(center_x - 4, center_y - 4, 9, 9, color);
+    fill_rect(center_x - 2, center_y - 6, 5, 2, color);
+    fill_rect(center_x - 2, center_y + 5, 5, 2, color);
+    fill_rect(center_x - 6, center_y - 2, 2, 5, color);
+    fill_rect(center_x + 5, center_y - 2, 2, 5, color);
+    fill_rect(center_x - 1, center_y - 1, 3, 3, hole);
+}
+
+static void draw_close_icon(const ui_rect_t *rect, u16 color)
+{
+    int index;
+    int center_x = rect->x + rect->width / 2;
+    int center_y = rect->y + rect->height / 2;
+
+    for (index = -4; index <= 4; ++index) {
+        fill_rect(center_x + index, center_y + index, 2, 2, color);
+        fill_rect(center_x + index, center_y - index, 2, 2, color);
+    }
+}
+
+static void draw_radio(int center_x, int center_y, int selected)
+{
+    u16 outline = rgb565(146, 164, 170);
+    u16 accent = rgb565(41, 178, 178);
+    u16 inside = rgb565(22, 34, 42);
+
+    fill_rect(center_x - 4, center_y - 6, 9, 2, outline);
+    fill_rect(center_x - 6, center_y - 4, 2, 9, outline);
+    fill_rect(center_x + 5, center_y - 4, 2, 9, outline);
+    fill_rect(center_x - 4, center_y + 5, 9, 2, outline);
+    fill_rect(center_x - 4, center_y - 4, 9, 9, inside);
+    if (selected)
+        fill_rect(center_x - 2, center_y - 2, 5, 5, accent);
+}
+
+static void draw_settings_row(void)
+{
+    u16 border = rgb565(55, 76, 84);
+    u16 fill = rgb565(17, 31, 39);
+    u16 muted = rgb565(146, 164, 170);
+    u16 text = rgb565(238, 244, 239);
+    u16 accent = rgb565(41, 178, 178);
+    int text_y = SETTINGS_ROW_Y + (SETTINGS_ROW_HEIGHT - 7) / 2;
+
+    fill_rect(8, SETTINGS_ROW_Y, 224, SETTINGS_ROW_HEIGHT, border);
+    fill_rect(10, SETTINGS_ROW_Y + 2, 192, SETTINGS_ROW_HEIGHT - 4, fill);
+    draw_text(14, text_y, "SCALE", 1, muted);
+    draw_text(51, text_y, k_algorithm_names[g_scale_algorithm], 1, text);
+
+    fill_rect(
+        k_settings_button.x, k_settings_button.y,
+        k_settings_button.width, k_settings_button.height, accent
+    );
+    fill_rect(
+        k_settings_button.x + 2, k_settings_button.y + 2,
+        k_settings_button.width - 4, k_settings_button.height - 4, fill
+    );
+    draw_gear_icon(
+        k_settings_button.x + k_settings_button.width / 2,
+        k_settings_button.y + k_settings_button.height / 2,
+        text, fill
+    );
+}
+
+static void draw_settings_overlay(void)
+{
+    const ui_rect_t panel = { 14, 64, 212, 180 };
+    u16 panel_border = rgb565(238, 177, 45);
+    u16 panel_fill = rgb565(14, 25, 32);
+    u16 row_fill = rgb565(22, 34, 42);
+    u16 row_border = rgb565(55, 76, 84);
+    u16 focus = rgb565(41, 178, 178);
+    u16 text = rgb565(238, 244, 239);
+    int title_width = label_width("SCALING", 2);
+    int index;
+
+    fill_rect(panel.x, panel.y, panel.width, panel.height, panel_border);
+    fill_rect(panel.x + 2, panel.y + 2, panel.width - 4, panel.height - 4,
+              panel_fill);
+    draw_text((SCREEN_WIDTH - title_width) / 2, 75, "SCALING", 2, text);
+
+    fill_rect(
+        k_settings_close.x, k_settings_close.y,
+        k_settings_close.width, k_settings_close.height, row_border
+    );
+    fill_rect(
+        k_settings_close.x + 2, k_settings_close.y + 2,
+        k_settings_close.width - 4, k_settings_close.height - 4, row_fill
+    );
+    draw_close_icon(&k_settings_close, text);
+
+    for (index = 0; index < SCALE_ALGORITHM_COUNT; ++index) {
+        const ui_rect_t *row = &k_settings_options[index];
+        u16 border = index == g_settings_selection ? focus : row_border;
+
+        fill_rect(row->x, row->y, row->width, row->height, border);
+        fill_rect(row->x + 2, row->y + 2, row->width - 4, row->height - 4,
+                  row_fill);
+        draw_radio(row->x + 18, row->y + row->height / 2,
+                   index == g_scale_algorithm);
+        draw_text(row->x + 38, row->y + (row->height - 14) / 2,
+                  k_algorithm_names[index], 2, text);
+    }
+}
+
+static u16 lerp_rgb565(u16 first, u16 second, u32 weight)
+{
+    u32 inverse;
+    u32 red;
+    u32 green;
+    u32 blue;
+
+    if (!weight || first == second)
+        return first;
+    inverse = 256u - weight;
+    red = ((first >> 11) * inverse + (second >> 11) * weight + 128u) >> 8;
+    green = ((((first >> 5) & 63u) * inverse +
+              ((second >> 5) & 63u) * weight + 128u) >> 8);
+    blue = (((first & 31u) * inverse + (second & 31u) * weight + 128u) >> 8);
+    return (u16)((red << 11) | (green << 5) | blue);
+}
+
+static void bilinear_scale_to_view(
+    const u16 *source, int source_width, int source_height, int source_stride,
+    const scale_axis_sample_t *x_samples,
+    const scale_axis_sample_t *y_samples
+)
+{
+    int y;
+
+    for (y = 0; y < VIEW_HEIGHT; ++y) {
+        u32 source_y = y_samples[y].index;
+        u32 next_y = source_y + 1u < (u32)source_height ?
+                     source_y + 1u : source_y;
+        u32 y_weight = y_samples[y].weight;
+        const u16 *top = source + source_y * source_stride;
+        const u16 *bottom = source + next_y * source_stride;
+        u16 *destination = g_scaled_framebuffer + y * VIEW_WIDTH;
+        int x;
+
+        for (x = 0; x < VIEW_WIDTH; ++x) {
+            u32 source_x = x_samples[x].index;
+            u32 next_x = source_x + 1u < (u32)source_width ?
+                         source_x + 1u : source_x;
+            u32 x_weight = x_samples[x].weight;
+            u16 top_color = lerp_rgb565(
+                top[source_x], top[next_x], x_weight
+            );
+            u16 bottom_color = lerp_rgb565(
+                bottom[source_x], bottom[next_x], x_weight
+            );
+
+            destination[x] = lerp_rgb565(top_color, bottom_color, y_weight);
+        }
+    }
+}
+
+static void native_scale_to_view(const u16 *source)
+{
+    const int offset_x = (VIEW_WIDTH - GAM4980_LCD_WIDTH) / 2;
+    const int offset_y = (VIEW_HEIGHT - GAM4980_LCD_HEIGHT) / 2;
+    int y;
+
+    bda_memset(g_scaled_framebuffer, 0, VIEW_FRAME_BYTES);
+    for (y = 0; y < GAM4980_LCD_HEIGHT; ++y) {
+        u16 *destination = g_scaled_framebuffer +
+            (offset_y + y) * VIEW_WIDTH + offset_x;
+        bda_memcpy(
+            destination, source + y * LCD_SOURCE_WIDTH,
+            GAM4980_LCD_WIDTH * 2u
+        );
+    }
+}
+
 static void scale_lcd_to_view(void)
 {
     const u16 *source = gam4980_framebuffer();
     int y;
 
+    if (g_scale_algorithm == SCALE_BILINEAR) {
+        bilinear_scale_to_view(
+            source, GAM4980_LCD_WIDTH, GAM4980_LCD_HEIGHT, LCD_SOURCE_WIDTH,
+            g_bilinear_x, g_bilinear_y
+        );
+        return;
+    }
+    if (g_scale_algorithm == SCALE_NATIVE) {
+        native_scale_to_view(source);
+        return;
+    }
+
     for (y = 0; y < VIEW_HEIGHT; ++y) {
-        const u16 *source_row = source + g_scale_y[y] * LCD_SOURCE_WIDTH;
+        const u16 *source_row = source + g_nearest_y[y] * LCD_SOURCE_WIDTH;
         u16 *destination = g_scaled_framebuffer + y * VIEW_WIDTH;
         int x;
 
         for (x = 0; x < VIEW_WIDTH; ++x)
-            destination[x] = source_row[g_scale_x[x]];
+            destination[x] = source_row[g_nearest_x[x]];
     }
 }
 
-static void copy_lcd_to_full_vx(void)
+static void copy_lcd_to_full_screen(void)
 {
     int y;
 
     for (y = 0; y < VIEW_HEIGHT; ++y) {
-        u8 *destination = g_screen_vx + VX_HEADER_SIZE +
-            (u32)((VIEW_Y + y) * SCREEN_WIDTH + VIEW_X) * 2u;
+        u16 *destination = g_screen_pixels +
+            (VIEW_Y + y) * SCREEN_WIDTH + VIEW_X;
         bda_memcpy(destination, g_scaled_framebuffer + y * VIEW_WIDTH,
                    VIEW_WIDTH * 2u);
     }
@@ -554,15 +806,17 @@ static void render_game_screen(void)
     u16 frame = rgb565(238, 177, 45);
     u32 index;
 
-    init_full_vx();
     fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, background);
     fill_rect(0, VIEW_Y - 3, SCREEN_WIDTH, VIEW_HEIGHT + 6,
               rgb565(36, 55, 63));
     fill_rect(0, VIEW_Y - 2, SCREEN_WIDTH, VIEW_HEIGHT + 4, frame);
     scale_lcd_to_view();
-    copy_lcd_to_full_vx();
+    copy_lcd_to_full_screen();
+    draw_settings_row();
     for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index)
         draw_button(&k_buttons[index]);
+    if (g_settings_open)
+        draw_settings_overlay();
 }
 
 static void release_draw_context(void)
@@ -592,52 +846,42 @@ static int acquire_draw_context(bda_handle_t owner)
     return 1;
 }
 
-static int present_back_rect(int x, int y, int width, int height)
-{
-    void *old_object;
-    int copy_result;
-
-    if (!g_draw || !g_back || !g_draw_object)
-        return 0;
-    (void)bda_gui_draw_guard_begin();
-    old_object = bda_gui_select_draw_object(g_draw, g_draw_object);
-    copy_result = bda_gui_context_copy(
-        g_back, x, y, width, height, g_draw, x, y, 0
-    );
-    (void)bda_gui_select_draw_object(g_draw, old_object);
-    (void)bda_gui_draw_guard_end();
-    return copy_result == 0;
-}
-
 static int present_screen(void)
 {
     int draw_result;
-    int copy_result;
+    int x = VIEW_X;
+    int y = VIEW_Y;
+    int width = VIEW_WIDTH;
+    int height = VIEW_HEIGHT;
+    bda_gui_picture_t *picture = &g_lcd_picture;
+    void *old_object;
 
-    if (!g_draw || !g_back || !g_draw_object)
+    if (!g_draw || !g_draw_object)
         return 0;
     if (g_full_redraw) {
         render_game_screen();
-        draw_result = bda_gui_draw_vx(g_back, 0, 0, g_screen_vx);
-        copy_result = draw_result == 0 ?
-            present_back_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT) : 0;
-        if (draw_result == 0 && copy_result)
-            g_full_redraw = 0;
-        return draw_result == 0 && copy_result;
+        g_full_picture.source_pixels = g_screen_pixels;
+        g_full_picture.selected_index = -1;
+        picture = &g_full_picture;
+        x = 0;
+        y = 0;
+        width = SCREEN_WIDTH;
+        height = SCREEN_HEIGHT;
+    } else {
+        scale_lcd_to_view();
+        g_lcd_picture.source_pixels = g_scaled_framebuffer;
+        g_lcd_picture.selected_index = -1;
     }
 
     (void)bda_gui_draw_guard_begin();
-    scale_lcd_to_view();
-    g_lcd_picture.source_pixels = g_scaled_framebuffer;
-    g_lcd_picture.selected_index = -1;
-    {
-        void *old_object = bda_gui_select_draw_object(g_draw, g_draw_object);
-        draw_result = bda_gui_render_picture(
-            g_draw, VIEW_X, VIEW_Y, VIEW_WIDTH, VIEW_HEIGHT, &g_lcd_picture
-        );
-        (void)bda_gui_select_draw_object(g_draw, old_object);
-    }
+    old_object = bda_gui_select_draw_object(g_draw, g_draw_object);
+    draw_result = bda_gui_render_picture(
+        g_draw, x, y, width, height, picture
+    );
+    (void)bda_gui_select_draw_object(g_draw, old_object);
     (void)bda_gui_draw_guard_end();
+    if (draw_result == 0)
+        g_full_redraw = 0;
     return draw_result == 0;
 }
 
@@ -645,6 +889,53 @@ static int point_in_button(int x, int y, const touch_button_t *button)
 {
     return x >= button->x && x < button->x + button->width &&
            y >= button->y && y < button->y + button->height;
+}
+
+static int point_in_rect(int x, int y, const ui_rect_t *rect)
+{
+    return x >= rect->x && x < rect->x + rect->width &&
+           y >= rect->y && y < rect->y + rect->height;
+}
+
+static u32 packet_mask(const bda_gui_input_packet_t *packet);
+
+static void sync_previous_keys(void)
+{
+    bda_gui_input_packet_t packet;
+
+    (void)bda_gui_input_packet(&packet);
+    g_previous_keys = packet_mask(&packet);
+}
+
+static void open_settings(void)
+{
+    sync_previous_keys();
+    g_settings_selection = g_scale_algorithm;
+    g_settings_key_release_ticks = 0;
+    g_settings_open = 1;
+    g_escape_pending = 0;
+    g_full_redraw = 1;
+}
+
+static void close_settings(void)
+{
+    sync_previous_keys();
+    g_settings_key_release_ticks = 0;
+    g_settings_open = 0;
+    g_full_redraw = 1;
+}
+
+static void apply_scaling_selection(void)
+{
+    if (g_settings_selection >= 0 &&
+        g_settings_selection < SCALE_ALGORITHM_COUNT &&
+        g_scale_algorithm != g_settings_selection) {
+        g_scale_algorithm = g_settings_selection;
+        write_scaling_config();
+        log_line("SCALING CHANGED");
+        log_line(k_algorithm_names[g_scale_algorithm]);
+    }
+    close_settings();
 }
 
 static void queue_touch(u32 packed)
@@ -665,6 +956,24 @@ static void drain_touches(void)
         u32 index;
 
         g_touch_read = (g_touch_read + 1u) % TOUCH_QUEUE_SIZE;
+        if (g_settings_open) {
+            if (point_in_rect(x, y, &k_settings_close)) {
+                close_settings();
+                continue;
+            }
+            for (index = 0; index < SCALE_ALGORITHM_COUNT; ++index) {
+                if (point_in_rect(x, y, &k_settings_options[index])) {
+                    g_settings_selection = (int)index;
+                    apply_scaling_selection();
+                    break;
+                }
+            }
+            continue;
+        }
+        if (point_in_rect(x, y, &k_settings_button)) {
+            open_settings();
+            continue;
+        }
         for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index) {
             if (point_in_button(x, y, &k_buttons[index])) {
                 gam4980_key_down(k_buttons[index].key);
@@ -740,6 +1049,40 @@ static void poll_game_keys(u32 now)
     g_previous_keys = current;
 }
 
+static void poll_settings_keys(void)
+{
+    bda_gui_input_packet_t packet;
+    u32 current;
+    u32 pressed;
+
+    (void)bda_gui_input_packet(&packet);
+    current = packet_mask(&packet);
+    if (g_settings_key_release_ticks < 4) {
+        if (current == 0)
+            ++g_settings_key_release_ticks;
+        else
+            g_settings_key_release_ticks = 0;
+        g_previous_keys = current;
+        return;
+    }
+    pressed = current & ~g_previous_keys;
+
+    if (pressed & (1u << 5)) {
+        apply_scaling_selection();
+    } else if (pressed & ((1u << 1) | (1u << 3))) {
+        --g_settings_selection;
+        if (g_settings_selection < 0)
+            g_settings_selection = SCALE_ALGORITHM_COUNT - 1;
+        g_full_redraw = 1;
+    } else if (pressed & ((1u << 0) | (1u << 2))) {
+        ++g_settings_selection;
+        if (g_settings_selection >= SCALE_ALGORITHM_COUNT)
+            g_settings_selection = 0;
+        g_full_redraw = 1;
+    }
+    g_previous_keys = current;
+}
+
 static int gam_window_proc(bda_handle_t handle, u32 message, u32 wparam, u32 lparam)
 {
     if (message == BDA_MSG_DRAW_CONTEXT_ATTACH) {
@@ -779,7 +1122,6 @@ static int run_window(void)
     g_frame = 0;
     g_draw = 0;
     g_draw_owner = 0;
-    g_back = 0;
     g_draw_object = 0;
     g_touch_read = 0;
     g_touch_write = 0;
@@ -791,6 +1133,9 @@ static int run_window(void)
     g_frame_count = 0;
     g_core_frame_phase = 0;
     g_core_break_logged = 0;
+    g_settings_open = 0;
+    g_settings_selection = g_scale_algorithm;
+    g_settings_key_release_ticks = 0;
 
     descriptor.style = 0;
     descriptor.title = k_window_title;
@@ -805,10 +1150,6 @@ static int run_window(void)
     g_draw_object = bda_gui_draw_object_create(7);
     if (!g_draw || !g_draw_object || (s32)(u32)g_draw_object == -1)
         goto cleanup;
-    g_back = bda_gui_compatible_context_create(g_draw);
-    if (!g_back || (s32)g_back == -1)
-        goto cleanup;
-
     last_frame_tick = bda_gui_tick_count_25ms() - 1u;
     last_save_tick = last_frame_tick;
     (void)bda_gui_input_packet(&initial_packet);
@@ -822,22 +1163,29 @@ static int run_window(void)
 
         drain_touches();
         if (!g_close_requested && elapsed_ticks >= 1u) {
-            int lcd_changed;
-
             last_frame_tick = now;
             if (elapsed_ticks > MAX_CATCHUP_TICKS)
                 elapsed_ticks = MAX_CATCHUP_TICKS;
-            poll_game_keys(now);
-            g_core_frame_phase += elapsed_ticks * 60u;
-            while (g_core_frame_phase >= 40u) {
-                gam4980_step_frame();
-                g_core_frame_phase -= 40u;
-            }
-            lcd_changed = gam4980_render_frame();
-            g_frame_count += elapsed_ticks;
-            if (g_full_redraw || lcd_changed) {
-                if (!present_screen())
+            if (g_settings_open) {
+                poll_settings_keys();
+                g_core_frame_phase = 0;
+                if (g_full_redraw && !present_screen())
                     log_line("PRESENT FAILED");
+            } else {
+                int lcd_changed;
+
+                poll_game_keys(now);
+                g_core_frame_phase += elapsed_ticks * 60u;
+                while (g_core_frame_phase >= 40u) {
+                    gam4980_step_frame();
+                    g_core_frame_phase -= 40u;
+                }
+                lcd_changed = gam4980_render_frame();
+                g_frame_count += elapsed_ticks;
+                if (g_full_redraw || lcd_changed) {
+                    if (!present_screen())
+                        log_line("PRESENT FAILED");
+                }
             }
         }
         if (!g_close_requested &&
@@ -865,10 +1213,6 @@ static int run_window(void)
     log_line("WINDOW END");
 
 cleanup:
-    if (g_back && (s32)g_back != -1) {
-        bda_gui_compatible_context_free(g_back);
-        g_back = 0;
-    }
     release_draw_context();
     if (g_frame) {
         bda_gui_close_frame(g_frame);
@@ -886,6 +1230,7 @@ int bda_main(void)
     (void)bda_fs_mkdir(k_data_dir);
     (void)bda_fs_mkdir(k_game_dir);
     reset_log();
+    load_scaling_config();
     log_line("START STANDALONE");
     g_save_path[0] = 0;
     g_loaded_game_size = 0;
