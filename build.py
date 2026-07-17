@@ -15,18 +15,21 @@ sys.path.insert(0, str(SDK_ROOT))
 from bda_packer.build import (  # noqa: E402
     ENTRY_OFFSET,
     ENTRY_VA,
+    ICON_SPECS,
     ICON_SIZES,
     ICON_START,
-    build_icons,
     bundled_prefix,
     find_tool,
 )
 from bda_packer.header import BdaHeaderFields, write_header  # noqa: E402
 from bda_packer.validate import validate_bda  # noqa: E402
+from bda_packer.vx_icon import make_vx, read_png, resize_cover, rgb565_bytes  # noqa: E402
 
 
 TITLE = "GAM4980"
 CATEGORY = 0x80000004
+ICON_PATH = PROJECT_ROOT / "assets" / "gam4980-icon.png"
+ICON_TRANSPARENT_KEY = (255, 0, 255)
 
 
 def run(command: list[str], step: str) -> None:
@@ -105,9 +108,26 @@ SECTIONS
         return raw.read_bytes()
 
 
+def build_app_icons() -> bytes:
+    source_width, source_height, source_pixels = read_png(ICON_PATH)
+    output = bytearray()
+
+    for width, height in ICON_SPECS:
+        resized = resize_cover(
+            source_width, source_height, source_pixels, width, height
+        )
+        pixels = rgb565_bytes(
+            resized,
+            (10, 20, 27),
+            transparent_key=ICON_TRANSPARENT_KEY,
+        )
+        output.extend(make_vx(width, height, pixels))
+    return bytes(output)
+
+
 def package_bda(payload: bytes) -> bytearray:
     data = bytearray(b"\0" * ENTRY_OFFSET)
-    icons = build_icons(None, (10, 20, 27))
+    icons = build_app_icons()
     expected_icon_bytes = ENTRY_OFFSET - ICON_START
     if len(icons) != expected_icon_bytes:
         raise SystemExit(

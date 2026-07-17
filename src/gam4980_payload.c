@@ -443,31 +443,30 @@ static int load_fixed_file(const char *path, u8 *out, u32 expected_size)
     return ok;
 }
 
-static u32 fnv1a(const u8 *data, u32 size, u32 hash)
+static int make_save_path(const char *game_path)
 {
+    u32 length;
+    char *extension = 0;
     u32 index;
-    for (index = 0; index < size; ++index) {
-        hash ^= data[index];
-        hash *= 16777619u;
+
+    if (!game_path)
+        return 0;
+    length = text_length(game_path);
+    if (length < 4u || length >= sizeof(g_save_path))
+        return 0;
+    copy_text(g_save_path, game_path, sizeof(g_save_path));
+    for (index = 0; index < length; ++index) {
+        if (g_save_path[index] == '\\' || g_save_path[index] == '/')
+            extension = 0;
+        else if (g_save_path[index] == '.')
+            extension = g_save_path + index;
     }
-    return hash;
-}
-
-static void make_save_path(const u8 *header, u32 size)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    u32 hash = fnv1a(header, GAM4980_GAME_HEADER_SIZE, 2166136261u);
-    char *out = g_save_path;
-    int shift;
-
-    hash = fnv1a((const u8 *)&size, sizeof(size), hash);
-    copy_text(g_save_path, k_data_dir, sizeof(g_save_path));
-    out += text_length(out);
-    *out++ = '\\';
-    *out++ = 'S';
-    for (shift = 28; shift >= 0; shift -= 4)
-        *out++ = hex[(hash >> shift) & 0x0f];
-    copy_text(out, ".SAV", (u32)(g_save_path + sizeof(g_save_path) - out));
+    if (!extension || extension + 4 != g_save_path + length)
+        return 0;
+    extension[1] = 's';
+    extension[2] = 'a';
+    extension[3] = 'v';
+    return 1;
 }
 
 static void load_save(void)
@@ -538,7 +537,8 @@ static int load_game(const char *path)
     if (gam4980_load_game_header(header, (u32)size) <= 0)
         return -4;
     g_loaded_game_size = (u32)size;
-    make_save_path(header, (u32)size);
+    if (!make_save_path(path))
+        return -5;
     load_save();
     gam4980_save_mark_clean();
     return 1;
