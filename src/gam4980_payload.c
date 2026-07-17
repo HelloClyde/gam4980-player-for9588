@@ -1086,11 +1086,14 @@ static void poll_settings_keys(void)
 static int gam_window_proc(bda_handle_t handle, u32 message, u32 wparam, u32 lparam)
 {
     if (message == BDA_MSG_DRAW_CONTEXT_ATTACH) {
+        bda_handle_t previous_draw = g_draw;
+
         g_frame = handle;
         (void)acquire_draw_context(handle);
         if (!g_draw_object)
             g_draw_object = bda_gui_draw_object_create(7);
-        g_full_redraw = 1;
+        if (!previous_draw || g_draw != previous_draw)
+            g_full_redraw = 1;
     } else if (message == BDA_MSG_DRAW_CONTEXT_DETACH) {
         if (!g_draw_owner || g_draw_owner == handle)
             release_draw_context();
