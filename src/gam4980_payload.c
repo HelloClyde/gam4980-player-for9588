@@ -19,6 +19,10 @@ void *memset(void *destination, int value, bda_size_t size)
 #define SCREEN_FRAME_BYTES (SCREEN_WIDTH * SCREEN_HEIGHT * 2u)
 #define LCD_SOURCE_WIDTH (GAM4980_LCD_WIDTH + 1)
 #define CORE_FRAME_BYTES (LCD_SOURCE_WIDTH * GAM4980_LCD_HEIGHT * 2u)
+#define FRAME_QUEUE_CAPACITY 32u
+#define FRAME_QUEUE_BYTES \
+    (GAM4980_LCD_PACKED_SIZE * FRAME_QUEUE_CAPACITY)
+#define FRAME_PRESENT_HOLD_TICKS 3u
 
 #define VIEW_X 0
 #define VIEW_Y 9
@@ -124,6 +128,7 @@ static bda_gui_picture_t g_lcd_picture;
 static bda_gui_picture_t g_full_picture;
 static u16 *g_scaled_framebuffer;
 static u16 *g_screen_pixels;
+static u8 *g_frame_queue;
 static bda_handle_t g_frame;
 static bda_handle_t g_draw;
 static bda_handle_t g_draw_owner;
@@ -151,6 +156,11 @@ static int g_scale_algorithm = SCALE_BILINEAR;
 static int g_settings_open;
 static int g_settings_selection;
 static int g_settings_key_release_ticks;
+static u32 g_frame_queue_read;
+static u32 g_frame_queue_write;
+static u32 g_frame_queue_count;
+static u32 g_frame_queue_drops;
+static u32 g_frame_present_hold_ticks;
 
 static void copy_text(char *out, const char *text, u32 capacity)
 {
@@ -235,6 +245,8 @@ static void release_buffers(void)
         bda_free(g_screen_pixels);
     if (valid_pointer(g_scaled_framebuffer))
         bda_free(g_scaled_framebuffer);
+    if (valid_pointer(g_frame_queue))
+        bda_free(g_frame_queue);
     if (valid_pointer(g_buffers.framebuffer))
         bda_free(g_buffers.framebuffer);
     if (valid_pointer(g_buffers.ram))
@@ -248,6 +260,7 @@ static void release_buffers(void)
     bda_memset(&g_buffers, 0, sizeof(g_buffers));
     g_scaled_framebuffer = 0;
     g_screen_pixels = 0;
+    g_frame_queue = 0;
 }
 
 static int allocate_buffers(void)
@@ -255,6 +268,7 @@ static int allocate_buffers(void)
     bda_memset(&g_buffers, 0, sizeof(g_buffers));
     g_scaled_framebuffer = 0;
     g_screen_pixels = 0;
+    g_frame_queue = 0;
 
     g_buffers.ram = (u8 *)bda_alloc(GAM4980_RAM_SIZE);
     g_buffers.flash = (u8 *)bda_alloc(GAM4980_FLASH_SIZE);
@@ -263,11 +277,13 @@ static int allocate_buffers(void)
     g_buffers.framebuffer = (u16 *)bda_alloc(CORE_FRAME_BYTES);
     g_scaled_framebuffer = (u16 *)bda_alloc(VIEW_FRAME_BYTES);
     g_screen_pixels = (u16 *)bda_alloc(SCREEN_FRAME_BYTES);
+    g_frame_queue = (u8 *)bda_alloc(FRAME_QUEUE_BYTES);
     if (!valid_pointer(g_buffers.ram) || !valid_pointer(g_buffers.flash) ||
         !valid_pointer(g_buffers.rom_8) || !valid_pointer(g_buffers.rom_e) ||
         !valid_pointer(g_buffers.framebuffer) ||
         !valid_pointer(g_scaled_framebuffer) ||
-        !valid_pointer(g_screen_pixels)) {
+        !valid_pointer(g_screen_pixels) ||
+        !valid_pointer(g_frame_queue)) {
         release_buffers();
         return 0;
     }
@@ -298,6 +314,51 @@ static int allocate_buffers(void)
     g_full_picture.source_pixels = g_screen_pixels;
     g_full_picture.selected_index = -1;
     return 1;
+}
+
+static void clear_frame_queue(void)
+{
+    g_frame_queue_read = 0;
+    g_frame_queue_write = 0;
+    g_frame_queue_count = 0;
+    g_frame_present_hold_ticks = 0;
+}
+
+static void enqueue_current_frame(void)
+{
+    u8 *destination;
+
+    if (g_frame_queue_count == FRAME_QUEUE_CAPACITY) {
+        g_frame_queue_read =
+            (g_frame_queue_read + 1u) % FRAME_QUEUE_CAPACITY;
+        --g_frame_queue_count;
+        ++g_frame_queue_drops;
+    }
+    destination = g_frame_queue +
+        g_frame_queue_write * GAM4980_LCD_PACKED_SIZE;
+    bda_memcpy(
+        destination, gam4980_packed_frame(), GAM4980_LCD_PACKED_SIZE
+    );
+    g_frame_queue_write =
+        (g_frame_queue_write + 1u) % FRAME_QUEUE_CAPACITY;
+    ++g_frame_queue_count;
+}
+
+static const u8 *peek_frame_queue(void)
+{
+    if (!g_frame_queue_count)
+        return 0;
+    return g_frame_queue +
+        g_frame_queue_read * GAM4980_LCD_PACKED_SIZE;
+}
+
+static void pop_frame_queue(void)
+{
+    if (!g_frame_queue_count)
+        return;
+    g_frame_queue_read =
+        (g_frame_queue_read + 1u) % FRAME_QUEUE_CAPACITY;
+    --g_frame_queue_count;
 }
 
 static int read_exact(int file, u8 *out, u32 size)
@@ -761,9 +822,8 @@ static void native_scale_to_view(const u16 *source)
     }
 }
 
-static void scale_lcd_to_view(void)
+static void scale_lcd_to_view(const u16 *source)
 {
-    const u16 *source = gam4980_framebuffer();
     int y;
 
     if (g_scale_algorithm == SCALE_BILINEAR) {
@@ -800,7 +860,7 @@ static void copy_lcd_to_full_screen(void)
     }
 }
 
-static void render_game_screen(void)
+static void render_game_screen(const u16 *source)
 {
     u16 background = rgb565(10, 20, 27);
     u16 frame = rgb565(238, 177, 45);
@@ -810,7 +870,7 @@ static void render_game_screen(void)
     fill_rect(0, VIEW_Y - 3, SCREEN_WIDTH, VIEW_HEIGHT + 6,
               rgb565(36, 55, 63));
     fill_rect(0, VIEW_Y - 2, SCREEN_WIDTH, VIEW_HEIGHT + 4, frame);
-    scale_lcd_to_view();
+    scale_lcd_to_view(source);
     copy_lcd_to_full_screen();
     draw_settings_row();
     for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index)
@@ -846,8 +906,9 @@ static int acquire_draw_context(bda_handle_t owner)
     return 1;
 }
 
-static int present_screen(void)
+static int present_screen(const u8 *packed_frame)
 {
+    const u16 *source = gam4980_expand_frame(packed_frame);
     int draw_result;
     int x = VIEW_X;
     int y = VIEW_Y;
@@ -856,10 +917,10 @@ static int present_screen(void)
     bda_gui_picture_t *picture = &g_lcd_picture;
     void *old_object;
 
-    if (!g_draw || !g_draw_object)
+    if (!source || !g_draw || !g_draw_object)
         return 0;
     if (g_full_redraw) {
-        render_game_screen();
+        render_game_screen(source);
         g_full_picture.source_pixels = g_screen_pixels;
         g_full_picture.selected_index = -1;
         picture = &g_full_picture;
@@ -868,7 +929,7 @@ static int present_screen(void)
         width = SCREEN_WIDTH;
         height = SCREEN_HEIGHT;
     } else {
-        scale_lcd_to_view();
+        scale_lcd_to_view(source);
         g_lcd_picture.source_pixels = g_scaled_framebuffer;
         g_lcd_picture.selected_index = -1;
     }
@@ -910,6 +971,7 @@ static void sync_previous_keys(void)
 static void open_settings(void)
 {
     sync_previous_keys();
+    clear_frame_queue();
     g_settings_selection = g_scale_algorithm;
     g_settings_key_release_ticks = 0;
     g_settings_open = 1;
@@ -976,6 +1038,7 @@ static void drain_touches(void)
         }
         for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index) {
             if (point_in_button(x, y, &k_buttons[index])) {
+                clear_frame_queue();
                 gam4980_key_down(k_buttons[index].key);
                 break;
             }
@@ -1023,12 +1086,15 @@ static void poll_game_keys(u32 now)
             continue;
         if (pressed & bit) {
             g_hold_frames[index] = 0;
+            clear_frame_queue();
             gam4980_key_down(packet_key(index));
         } else if (current & bit) {
             ++g_hold_frames[index];
             if (g_hold_frames[index] >= 12u &&
-                ((g_hold_frames[index] - 12u) % 3u) == 0u)
+                ((g_hold_frames[index] - 12u) % 3u) == 0u) {
+                clear_frame_queue();
                 gam4980_key_down(packet_key(index));
+            }
         } else {
             g_hold_frames[index] = 0;
         }
@@ -1043,6 +1109,7 @@ static void poll_game_keys(u32 now)
         g_close_requested = 1;
         g_escape_pending = 0;
     } else if (g_escape_pending && (released & (1u << 4))) {
+        clear_frame_queue();
         gam4980_key_down(GAM4980_KEY_EXIT);
         g_escape_pending = 0;
     }
@@ -1139,6 +1206,8 @@ static int run_window(void)
     g_settings_open = 0;
     g_settings_selection = g_scale_algorithm;
     g_settings_key_release_ticks = 0;
+    clear_frame_queue();
+    g_frame_queue_drops = 0;
 
     descriptor.style = 0;
     descriptor.title = k_window_title;
@@ -1172,22 +1241,37 @@ static int run_window(void)
             if (g_settings_open) {
                 poll_settings_keys();
                 g_core_frame_phase = 0;
-                if (g_full_redraw && !present_screen())
+                if (g_full_redraw &&
+                    !present_screen(gam4980_packed_frame()))
                     log_line("PRESENT FAILED");
             } else {
-                int lcd_changed;
+                const u8 *queued_frame;
 
                 poll_game_keys(now);
+                if (elapsed_ticks >= g_frame_present_hold_ticks)
+                    g_frame_present_hold_ticks = 0;
+                else
+                    g_frame_present_hold_ticks -= elapsed_ticks;
                 g_core_frame_phase += elapsed_ticks * 60u;
                 while (g_core_frame_phase >= 40u) {
                     gam4980_step_frame();
                     g_core_frame_phase -= 40u;
+                    if (gam4980_render_frame())
+                        enqueue_current_frame();
                 }
-                lcd_changed = gam4980_render_frame();
                 g_frame_count += elapsed_ticks;
-                if (g_full_redraw || lcd_changed) {
-                    if (!present_screen())
+                queued_frame = peek_frame_queue();
+                if (queued_frame && !g_frame_present_hold_ticks) {
+                    if (present_screen(queued_frame)) {
+                        pop_frame_queue();
+                        g_frame_present_hold_ticks =
+                            FRAME_PRESENT_HOLD_TICKS;
+                    } else {
                         log_line("PRESENT FAILED");
+                    }
+                } else if (!queued_frame && g_full_redraw &&
+                           !present_screen(gam4980_packed_frame())) {
+                    log_line("PRESENT FAILED");
                 }
             }
         }
@@ -1199,6 +1283,7 @@ static int run_window(void)
         if (gam4980_shutdown_requested() && !g_core_break_logged) {
             log_hex_value("CORE BRK PC=", gam4980_shutdown_pc());
             log_hex_value("CORE FRAME=", g_frame_count);
+            log_hex_value("FRAME DROPS=", g_frame_queue_drops);
             g_core_break_logged = 1;
         }
         if (g_close_requested && close_wait == 0) {

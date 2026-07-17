@@ -47,12 +47,18 @@ game-sized heap buffer is not required.
 ## Rendering and timing
 
 - The emulator advances at the upstream 60 Hz rate. The 9588 host loop runs at
-  40 Hz and schedules core frames in a 1, 2, 1, 2 pattern, then presents only
-  the newest frame. If a GUI call overruns a 25 ms host slot, the next iteration
-  catches up the missed simulation slots in one batch instead of slowing down
-  emulated time or drawing every intermediate frame.
+  40 Hz and schedules core frames in a 1, 2, 1, 2 pattern. LCD changes are
+  captured after every core frame into a 32-slot, 1-bit LCD queue. The queue is
+  60 KiB instead of the 960 KiB required by RGB565 frames. Each queued frame
+  remains visible for at least three 25 ms host slots before the next frame is
+  presented, which prevents a 30 Hz panel scanout from missing updates while
+  retaining enough throughput for the game's animation cadence. If the queue
+  fills during a long overrun, the oldest frame is dropped to keep latency
+  bounded. User input clears queued historical frames so controls are not held
+  behind animation playback.
 - LCD RAM writes set a dirty flag. Unchanged frames skip both RGB565 conversion
-  and GUI submission.
+  and GUI submission. Packed LCD frames are expanded to RGB565 only when they
+  reach the head of the presentation queue.
 - The active 159x96 LCD is scaled in software to 240x145. A settings button
   between the LCD and touch controls selects nearest-neighbor, bilinear, or
   native-resolution display. Bilinear is the default. Native mode centers the
@@ -70,10 +76,12 @@ game-sized heap buffer is not required.
 - Save flash is written to the filesystem only after the emulated save region
   has actually changed.
 
-An 8013 emulator A/B run advanced the same game through the same 30-input
-sequence in about 23.3 seconds. The 240x145 build executed 0.4% fewer guest
-instructions and submitted 97 changed GUI frames versus 105 at native size.
-This is an emulator comparison, not a physical-device benchmark.
+In the 8013 emulator, the `Fumo Ji` title animation improved from 116 visible
+updates in 13.44 seconds (8.63 FPS) to 189 updates in 14.26 seconds (13.26 FPS).
+The upstream no-ghosting core baseline is 13.86 FPS for the same animation. The
+final run reported no invalid GUI calls or recovery events, and a static settings
+panel produced no redundant frames over five seconds. These are emulator
+measurements, not physical-device benchmarks.
 
 ## Controls
 

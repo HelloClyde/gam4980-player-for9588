@@ -61,7 +61,8 @@
 
 #define LCD_WIDTH GAM4980_LCD_WIDTH
 #define LCD_HEIGHT GAM4980_LCD_HEIGHT
-#define LCD_STRIDE (LCD_WIDTH + 1)
+#define LCD_STRIDE GAM4980_LCD_STRIDE
+#define LCD_PACKED_STRIDE GAM4980_LCD_PACKED_STRIDE
 
 static uint16_t *fb;
 static int shutdown_requested;
@@ -72,6 +73,8 @@ static uint32_t step_cycle_fraction;
 static uint32_t rtc_frames;
 static uint32_t timer_ticks[5];
 static uint32_t lcd_nibble_lut[16][2];
+static uint8_t lcd_frame[GAM4980_LCD_PACKED_SIZE];
+static int lcd_frame_valid;
 static int lcd_dirty;
 static int save_dirty;
 
@@ -827,6 +830,7 @@ int gam4980_init(const gam4980_buffers_t *buffers)
     bda_memset(sys.ram, 0x00, GAM4980_RAM_SIZE);
     bda_memset(sys.flash, 0xff, GAM4980_FLASH_SIZE);
     bda_memset(fb, 0x00, LCD_STRIDE * LCD_HEIGHT * sizeof(*fb));
+    bda_memset(lcd_frame, 0x00, sizeof(lcd_frame));
     shutdown_requested = 0;
     shutdown_pc = 0;
     step_cycles = 0;
@@ -834,6 +838,7 @@ int gam4980_init(const gam4980_buffers_t *buffers)
     step_cycle_fraction = 0;
     rtc_frames = 0;
     bda_memset(timer_ticks, 0, sizeof(timer_ticks));
+    lcd_frame_valid = 0;
     lcd_dirty = 1;
     save_dirty = 0;
     init_lcd_lut();
@@ -1328,18 +1333,24 @@ void retro_reset(void)
 }
 #endif
 
-static inline int pp8(int y, int x, uint8_t p8)
+static inline void unpack8(int y, int x, uint8_t p8)
 {
     uint32_t *destination = (uint32_t *)(fb + y * LCD_STRIDE + x * 8);
     const uint32_t *high = lcd_nibble_lut[p8 >> 4];
     const uint32_t *low = lcd_nibble_lut[p8 & 0x0fu];
-    int changed = destination[0] != high[0] || destination[1] != high[1] ||
-                  destination[2] != low[0] || destination[3] != low[1];
 
     destination[0] = high[0];
     destination[1] = high[1];
     destination[2] = low[0];
     destination[3] = low[1];
+}
+
+static inline int capture8(int y, int x, uint8_t p8)
+{
+    uint8_t *destination = lcd_frame + y * LCD_PACKED_STRIDE + x;
+    int changed = !lcd_frame_valid || *destination != p8;
+
+    *destination = p8;
     return changed;
 }
 
@@ -1388,16 +1399,17 @@ int gam4980_render_frame(void)
 
     for (int j = 65; j >= -30; j -= 1) {
         for (int i = 1; i < 20; i += 1) {
-            changed |= pp8(j >= 0 ? j : (j * -1 + 65), i, *v++);
+            changed |= capture8(j >= 0 ? j : (j * -1 + 65), i, *v++);
         }
         v += 13;
     }
     v = sys.ram + 0x413;
     for (int j = 64; j >= -30; j -= 1) {
-        changed |= pp8(j >= 0 ? j : (j * -1 + 65), 0, *v++);
+        changed |= capture8(j >= 0 ? j : (j * -1 + 65), 0, *v++);
         v += 31;
     }
-    changed |= pp8(65, 0, sys.ram[0x0ff3]);
+    changed |= capture8(65, 0, sys.ram[0x0ff3]);
+    lcd_frame_valid = 1;
     lcd_dirty = 0;
     return changed;
 }
@@ -1406,6 +1418,7 @@ void gam4980_run_frame(void)
 {
     gam4980_step_frame();
     (void)gam4980_render_frame();
+    (void)gam4980_expand_frame(lcd_frame);
 }
 
 int gam4980_cpu_halted(void)
@@ -1507,8 +1520,30 @@ void gam4980_key_down(u8 key)
     sys_keydown(key);
 }
 
+const u8 *gam4980_packed_frame(void)
+{
+    return lcd_frame;
+}
+
+const u16 *gam4980_expand_frame(const u8 *packed_frame)
+{
+    int y;
+
+    if (!packed_frame || !fb)
+        return 0;
+    for (y = 0; y < LCD_HEIGHT; ++y) {
+        int x;
+
+        for (x = 0; x < LCD_PACKED_STRIDE; ++x)
+            unpack8(y, x, packed_frame[y * LCD_PACKED_STRIDE + x]);
+    }
+    return fb;
+}
+
 const u16 *gam4980_framebuffer(void)
 {
+    if (lcd_frame_valid)
+        (void)gam4980_expand_frame(lcd_frame);
     return fb;
 }
 
@@ -1548,6 +1583,8 @@ void gam4980_deinit(void)
     step_cycle_fraction = 0;
     rtc_frames = 0;
     bda_memset(timer_ticks, 0, sizeof(timer_ticks));
+    bda_memset(lcd_frame, 0, sizeof(lcd_frame));
+    lcd_frame_valid = 0;
     lcd_dirty = 0;
     save_dirty = 0;
 }

@@ -5,6 +5,10 @@
 
 #define GAM4980_LCD_WIDTH 159
 #define GAM4980_LCD_HEIGHT 96
+#define GAM4980_LCD_STRIDE (GAM4980_LCD_WIDTH + 1)
+#define GAM4980_LCD_PACKED_STRIDE (GAM4980_LCD_STRIDE / 8)
+#define GAM4980_LCD_PACKED_SIZE \
+    (GAM4980_LCD_PACKED_STRIDE * GAM4980_LCD_HEIGHT)
 #define GAM4980_ROM_SIZE 0x200000u
 #define GAM4980_RAM_SIZE 0x8000u
 #define GAM4980_FLASH_SIZE 0x200000u
@@ -44,6 +48,8 @@ void gam4980_step_frame(void);
 int gam4980_render_frame(void);
 void gam4980_run_frame(void);
 int gam4980_cpu_halted(void);
+const u8 *gam4980_packed_frame(void);
+const u16 *gam4980_expand_frame(const u8 *packed_frame);
 const u16 *gam4980_framebuffer(void);
 u8 *gam4980_save_data(void);
 int gam4980_save_dirty(void);
