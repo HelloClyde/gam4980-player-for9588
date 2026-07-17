@@ -1,114 +1,100 @@
 # gam4980-9588
 
-BBK 9588 port of the GPLv3 `gam4980` emulator core.
+将 GPLv3 `gam4980` 模拟器核心移植到 BBK 9588。
 
-This project is intentionally separate from the SDK examples. It builds a
-standalone `GAM4980.BDA` with its own entry point, icons, system file selector,
-and freestanding 9588 payload. It does not read or patch another BDA as a template.
-The payload includes only the parent SDK's formal `sdk/include/bda_sdk.h`; the
-research header and `reverse` include directory are not build dependencies.
+本项目与 SDK 示例相互独立。它会构建一个拥有独立入口、图标、系统文件
+选择器和 9588 裸机载荷的 `GAM4980.BDA`，不会读取或修改其他 BDA 作为
+模板。载荷只包含父级 SDK 的正式头文件 `sdk/include/bda_sdk.h`，构建过程
+不依赖研究头文件或 `reverse` 目录。
 
-## Local requirements
+## 运行要求
 
-- `8.BIN` and `E.BIN` installed on the device at:
+- 在设备上安装 `8.BIN` 和 `E.BIN`：
 
   ```text
   A:\应用\数据\游戏\gam4980\8.BIN
   A:\应用\数据\游戏\gam4980\E.BIN
   ```
 
-- The MIPS toolchain bundled or configured by the parent 9588 SDK.
-- A parent SDK revision whose formal include provides the verified heap,
-  seek, system file selector, frame lifecycle, and raw RGB565 picture APIs.
+- 使用父级 9588 SDK 自带或已配置的 MIPS 工具链。
+- 父级 SDK 的正式头文件需要包含已验证的堆内存、文件定位、系统文件
+  选择器、窗口生命周期和原始 RGB565 图片 API。
 
-Firmware dumps, games, saves, the patched BDA, and other generated artifacts
-must not be committed.
+固件镜像、游戏、存档、打包后的 BDA 和其他生成文件均不得提交到仓库。
 
-Place `.gam` files in:
+将 `.gam` 游戏文件放在：
 
 ```text
 A:\gam4980\
 ```
 
-## Build
+## 构建
 
-From the SDK workspace root:
+在 SDK 工作区根目录执行：
 
 ```powershell
 python .\gam4980-9588\build.py
 python -m bda_packer.validate .\gam4980-9588\build\GAM4980.BDA
 ```
 
-The application opens the firmware's formal system file selector through
-`bda_gui_select_file()`. It defaults to `A:\gam4980\` and filters for `.gam`
-files. The selected game is streamed directly into emulated flash, so a second
-game-sized heap buffer is not required.
+应用通过正式 API `bda_gui_select_file()` 打开固件系统文件选择器。选择器
+默认进入 `A:\gam4980\`，并只显示 `.gam` 文件。选中的游戏会直接流式写入
+模拟闪存，因此不需要额外分配一个与游戏等大的堆缓冲区。
 
-## Rendering and timing
+## 渲染与时序
 
-- The emulator advances at the upstream 60 Hz rate. The 9588 host loop runs at
-  40 Hz and schedules core frames in a 1, 2, 1, 2 pattern. LCD changes are
-  captured after every core frame into a 32-slot, 1-bit LCD queue. The queue is
-  60 KiB instead of the 960 KiB required by RGB565 frames. Each queued frame
-  remains visible for at least three 25 ms host slots before the next frame is
-  presented, which prevents a 30 Hz panel scanout from missing updates while
-  retaining enough throughput for the game's animation cadence. If the queue
-  fills during a long overrun, the oldest frame is dropped to keep latency
-  bounded. User input clears queued historical frames so controls are not held
-  behind animation playback.
-- LCD RAM writes set a dirty flag. Unchanged frames skip both RGB565 conversion
-  and GUI submission. Packed LCD frames are expanded to RGB565 only when they
-  reach the head of the presentation queue.
-- The active 159x96 LCD is scaled in software to 240x145. A settings button
-  between the LCD and touch controls selects nearest-neighbor, bilinear, or
-  native-resolution display. Bilinear is the default. Native mode centers the
-  unscaled 159x96 image inside the 240x145 view. Coordinate maps for the scaled
-  modes are computed once at startup, and every RGB565 buffer is submitted at
-  its native descriptor size through the formal picture API; the application
-  does not depend on unverified firmware picture scaling.
-- Changed LCD frames are submitted directly to the visible draw context under
-  the firmware draw guard. The full 240x320 RGB565 interface is submitted when
-  the view is created or settings change; ordinary updates cover only the
-  240x145 LCD view.
-- The LCD unpacker uses a 16-entry nibble lookup table and aligned 32-bit stores.
-- HALT periods are advanced to the next timer event instead of interpreting idle
-  CPU cycles one instruction at a time.
-- Save flash is written to the filesystem only after the emulated save region
-  has actually changed.
+- 模拟器按照上游的 60 Hz 频率运行。9588 主循环为 40 Hz，以
+  `1、2、1、2` 的节奏调度核心帧。每个核心帧产生的 LCD 变化都会进入一个
+  具有 32 个槽位的 1 位 LCD 帧队列。该队列只占 60 KiB，而 RGB565 队列
+  需要 960 KiB。每个队列帧至少显示三个 25 ms 主机时隙，避免 30 Hz
+  屏幕扫描遗漏更新，同时维持游戏动画需要的吞吐量。如果主循环长时间
+  超时导致队列填满，会丢弃最旧的帧以限制延迟。用户输入会清空历史帧，
+  防止操作被积压的动画阻塞。
+- 写入 LCD RAM 时会设置脏标记。未发生变化的帧不会执行 RGB565 转换，也
+  不会提交到 GUI。打包的 LCD 帧只有到达显示队列头部时才展开为 RGB565。
+- 有效 LCD 分辨率为 159x96，通过软件缩放到 240x145。LCD 与触摸按键之间
+  的设置按钮可选择最近邻、双线性或原始分辨率显示，默认使用双线性。
+  原始分辨率模式会将未经缩放的 159x96 画面居中放入 240x145 显示区。
+  缩放模式使用的坐标映射在启动时只计算一次。每个 RGB565 缓冲区都会按
+  自身描述符尺寸通过正式图片 API 提交，不依赖未经验证的固件图片缩放。
+- 发生变化的 LCD 帧会在固件绘图保护范围内直接提交到可见绘图上下文。
+  创建界面或修改设置时提交完整的 240x320 RGB565 画面；普通更新只覆盖
+  240x145 LCD 显示区。
+- LCD 解包器使用 16 项半字节查找表和对齐的 32 位写入。
+- CPU 进入 HALT 后会直接推进到下一个定时器事件，不会逐条解释空闲周期。
+- 只有模拟存档区实际发生变化后，才会将闪存存档写入文件系统。
 
-In the 8013 emulator, the `Fumo Ji` title animation improved from 116 visible
-updates in 13.44 seconds (8.63 FPS) to 189 updates in 14.26 seconds (13.26 FPS).
-The upstream no-ghosting core baseline is 13.86 FPS for the same animation. The
-final run reported no invalid GUI calls or recovery events, and a static settings
-panel produced no redundant frames over five seconds. These are emulator
-measurements, not physical-device benchmarks.
+在 8013 模拟器中，《伏魔记》标题动画由 13.44 秒内 116 次可见更新
+（8.63 FPS）提升到 14.26 秒内 189 次更新（13.26 FPS）。相同动画在上游
+关闭残影后的基线为 13.86 FPS。最终测试没有出现无效 GUI 调用或恢复事件，
+设置面板静置五秒也没有产生重复帧。以上结果来自模拟器，并非真机性能数据。
 
-## Controls
+## 操作方式
 
-- Direction keys: emulated direction keys
-- Enter: emulated Enter
-- Escape (short press): emulated Exit
-- Escape (hold for one second): close the emulator
-- Touch controls: direction pad, Enter, Exit, Page Up, and Page Down
-- Settings: touch the gear button; use Up/Down and Enter in the settings panel,
-  or touch an algorithm row. The panel's X button closes it without changing.
+- 方向键：模拟方向键
+- 确认键：模拟 Enter
+- 短按退出键：模拟 Exit
+- 长按退出键一秒：关闭模拟器
+- 触摸按键：方向键、Enter、Exit、Page Up 和 Page Down
+- 设置：点击齿轮按钮；在设置面板中使用上/下键和 Enter，或直接点击缩放
+  算法。点击面板的 X 按钮可关闭设置且不修改当前选项。
 
-The selected scaling algorithm is stored at:
+选择的缩放算法保存在：
 
 ```text
 A:\应用\数据\游戏\gam4980\GAM4980.CFG
 ```
 
-Missing or invalid configuration files fall back to bilinear scaling.
+配置文件不存在或内容无效时，会回退到双线性缩放。
 
-Save data is written under `A:\应用\数据\游戏\gam4980` using a game-specific
-hash filename.
+存档使用游戏专属的哈希文件名，写入
+`A:\应用\数据\游戏\gam4980` 目录。
 
-## Upstream
+## 上游项目
 
-Core source is derived from:
+核心源码来自：
 
 - <https://codeberg.org/iyzsong/gam4980>
-- upstream commit `36ce6d076d1103fa4a48e9e775cee28c31c03480`
+- 上游提交 `36ce6d076d1103fa4a48e9e775cee28c31c03480`
 
-The emulator core remains licensed under GPLv3; see `COPYING`.
+模拟器核心继续采用 GPLv3 许可证，详见 `COPYING`。
