@@ -26,14 +26,6 @@ void *memset(void *destination, int value, bda_size_t size)
 #define VIEW_WIDTH GAM4980_LCD_WIDTH
 #define VIEW_HEIGHT GAM4980_LCD_HEIGHT
 
-#define MAX_GAME_FILES 24u
-#define SELECTOR_VISIBLE_ROWS 7u
-#define SELECTOR_ROW_TOP 72
-#define SELECTOR_ROW_HEIGHT 30
-
-#define WINDOW_MODE_SELECTOR 0
-#define WINDOW_MODE_GAME 1
-
 #define TOUCH_QUEUE_SIZE 16u
 #define ESCAPE_QUIT_TICKS 40u
 #define SAVE_INTERVAL_TICKS 400u
@@ -49,7 +41,8 @@ typedef struct touch_button {
 } touch_button_t;
 
 static const char k_window_title[] = "GAM4980";
-static const char k_selector_title[] = "SELECT GAM";
+static const char k_game_dir[] = "A:\\gam4980";
+static const char k_game_selector_path[] = "A:\\gam4980\\";
 static const char k_data_dir[] =
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980";
 static const char k_rom_8_path[] =
@@ -68,12 +61,6 @@ static const touch_button_t k_buttons[] = {
     { 150, 228, 82, 42, GAM4980_KEY_EXIT, "EXIT" },
     { 150, 278, 38, 34, GAM4980_KEY_PAGE_UP, "PGUP" },
     { 194, 278, 38, 34, GAM4980_KEY_PAGE_DOWN, "PGDN" },
-};
-
-static const touch_button_t k_selector_buttons[] = {
-    { 10, 284, 38, 28, GAM4980_KEY_UP, 0 },
-    { 54, 284, 38, 28, GAM4980_KEY_DOWN, 0 },
-    { 150, 284, 80, 28, GAM4980_KEY_ENTER, "OPEN" },
 };
 
 static const u8 k_font[36][7] = {
@@ -98,6 +85,7 @@ static const u8 k_font[36][7] = {
 };
 
 static gam4980_buffers_t g_buffers;
+static bda_file_selector_t g_file_selector;
 static bda_gui_picture_t g_lcd_picture;
 static u8 *g_screen_vx;
 static bda_handle_t g_frame;
@@ -109,22 +97,14 @@ static u32 g_touch_queue[TOUCH_QUEUE_SIZE];
 static volatile u32 g_touch_read;
 static volatile u32 g_touch_write;
 static volatile int g_detached;
-static char g_game_path[260];
-static char g_game_paths[MAX_GAME_FILES][260];
 static char g_save_path[160];
-static u32 g_game_count;
-static u32 g_selected_game;
-static u32 g_selector_top;
 static u32 g_previous_keys;
 static u32 g_hold_frames[6];
 static u32 g_escape_down_tick;
 static u32 g_frame_count;
 static u32 g_loaded_game_size;
 static u32 g_core_frame_phase;
-static int g_window_mode;
 static int g_full_redraw;
-static int g_selector_redraw;
-static int g_start_requested;
 static int g_escape_pending;
 static int g_close_requested;
 static int g_core_break_logged;
@@ -150,90 +130,6 @@ static u32 text_length(const char *text)
     while (text[length])
         ++length;
     return length;
-}
-
-static char ascii_lower(char character)
-{
-    if (character >= 'A' && character <= 'Z')
-        return (char)(character + ('a' - 'A'));
-    return character;
-}
-
-static const char *path_basename(const char *path)
-{
-    const char *name = path;
-
-    while (*path) {
-        if (*path == '\\' || *path == '/')
-            name = path + 1;
-        ++path;
-    }
-    return name;
-}
-
-static int is_gam_name(const char *name)
-{
-    u32 length = text_length(name);
-
-    return length > 4u && name[length - 4u] == '.' &&
-           ascii_lower(name[length - 3u]) == 'g' &&
-           ascii_lower(name[length - 2u]) == 'a' &&
-           ascii_lower(name[length - 1u]) == 'm';
-}
-
-static void add_game_path(const char *raw_path)
-{
-    const char *name = path_basename(raw_path);
-    char *out;
-    u32 remaining;
-
-    if (!name[0] || !is_gam_name(name) || g_game_count >= MAX_GAME_FILES)
-        return;
-    copy_text(g_game_paths[g_game_count], k_data_dir,
-              sizeof(g_game_paths[g_game_count]));
-    out = g_game_paths[g_game_count] + text_length(g_game_paths[g_game_count]);
-    remaining = (u32)(g_game_paths[g_game_count] +
-                      sizeof(g_game_paths[g_game_count]) - out);
-    if (remaining > 1u) {
-        *out++ = '\\';
-        --remaining;
-    }
-    copy_text(out, name, remaining);
-    ++g_game_count;
-}
-
-static int scan_game_pattern(const char *pattern)
-{
-    bda_fs_find_data_t find_data;
-    int result;
-    u32 iterations = 0;
-
-    bda_fs_find_data_init(&find_data);
-    result = bda_fs_findfirst(pattern, 0x27u, &find_data);
-    if (result == -1)
-        return 0;
-    while (result != -1 && iterations++ < 256u) {
-        find_data.name_or_path[sizeof(find_data.name_or_path) - 1u] = 0;
-        add_game_path(find_data.name_or_path);
-        if (g_game_count >= MAX_GAME_FILES)
-            break;
-        result = bda_fs_findnext(&find_data);
-    }
-    (void)bda_fs_findclose(&find_data);
-    return g_game_count != 0u;
-}
-
-static int scan_games(void)
-{
-    g_game_count = 0;
-    g_selected_game = 0;
-    g_selector_top = 0;
-    bda_memset(g_game_paths, 0, sizeof(g_game_paths));
-    if (bda_fs_chdir(k_data_dir) == -1)
-        return 0;
-    if (!scan_game_pattern("*.gam"))
-        (void)scan_game_pattern("*.*");
-    return g_game_count != 0u;
 }
 
 static void log_line(const char *text)
@@ -650,33 +546,6 @@ static void render_game_screen(void)
         draw_button(&k_buttons[index]);
 }
 
-static void render_selector_background(void)
-{
-    u16 background = rgb565(10, 20, 27);
-    u16 panel = rgb565(24, 39, 48);
-    u16 border = rgb565(41, 178, 178);
-    u16 selected = rgb565(35, 91, 99);
-    u32 row;
-
-    init_full_vx();
-    fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, background);
-    draw_text(64, 18, k_selector_title, 2, rgb565(238, 244, 239));
-    fill_rect(12, 54, 216, 2, rgb565(238, 177, 45));
-    for (row = 0; row < SELECTOR_VISIBLE_ROWS; ++row) {
-        u32 game_index = g_selector_top + row;
-        int y = SELECTOR_ROW_TOP + (int)row * SELECTOR_ROW_HEIGHT;
-
-        if (game_index >= g_game_count)
-            break;
-        fill_rect(10, y, 220, SELECTOR_ROW_HEIGHT - 4,
-                  game_index == g_selected_game ? selected : panel);
-        frame_rect(10, y, 220, SELECTOR_ROW_HEIGHT - 4,
-                   game_index == g_selected_game ? border : rgb565(47, 65, 73));
-    }
-    for (row = 0; row < sizeof(k_selector_buttons) / sizeof(k_selector_buttons[0]); ++row)
-        draw_button(&k_selector_buttons[row]);
-}
-
 static void release_draw_context(void)
 {
     bda_handle_t draw = g_draw;
@@ -719,46 +588,6 @@ static int present_back_rect(int x, int y, int width, int height)
     (void)bda_gui_select_draw_object(g_draw, old_object);
     (void)bda_gui_draw_guard_end();
     return copy_result == 0;
-}
-
-static void draw_selector_names(void)
-{
-    void *old_object;
-    u32 normal;
-    u32 active;
-    u32 row;
-
-    old_object = bda_gui_select_draw_object(g_back, g_draw_object);
-    normal = (u32)bda_gui_rgb(g_back, 220, 230, 232);
-    active = (u32)bda_gui_rgb(g_back, 255, 255, 255);
-    (void)bda_gui_set_text_mode(g_back, 1);
-    for (row = 0; row < SELECTOR_VISIBLE_ROWS; ++row) {
-        u32 game_index = g_selector_top + row;
-        int y = SELECTOR_ROW_TOP + (int)row * SELECTOR_ROW_HEIGHT + 5;
-
-        if (game_index >= g_game_count)
-            break;
-        (void)bda_gui_set_text_color(
-            g_back, game_index == g_selected_game ? active : normal
-        );
-        (void)bda_gui_draw_text(
-            g_back, 18, y, path_basename(g_game_paths[game_index]), -1
-        );
-    }
-    (void)bda_gui_select_draw_object(g_back, old_object);
-}
-
-static int present_selector(void)
-{
-    int draw_result;
-
-    if (!g_draw || !g_back || !g_draw_object)
-        return 0;
-    render_selector_background();
-    draw_result = bda_gui_draw_vx(g_back, 0, 0, g_screen_vx);
-    draw_selector_names();
-    return draw_result == 0 &&
-           present_back_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 }
 
 static int present_screen(void)
@@ -807,18 +636,6 @@ static void queue_touch(u32 packed)
     g_touch_write = next;
 }
 
-static void set_selected_game(u32 selected)
-{
-    if (selected >= g_game_count || selected == g_selected_game)
-        return;
-    g_selected_game = selected;
-    if (g_selected_game < g_selector_top)
-        g_selector_top = g_selected_game;
-    else if (g_selected_game >= g_selector_top + SELECTOR_VISIBLE_ROWS)
-        g_selector_top = g_selected_game - SELECTOR_VISIBLE_ROWS + 1u;
-    g_selector_redraw = 1;
-}
-
 static void drain_touches(void)
 {
     while (g_touch_read != g_touch_write) {
@@ -828,32 +645,6 @@ static void drain_touches(void)
         u32 index;
 
         g_touch_read = (g_touch_read + 1u) % TOUCH_QUEUE_SIZE;
-        if (g_window_mode == WINDOW_MODE_SELECTOR) {
-            if (x >= 10 && x < 230 && y >= SELECTOR_ROW_TOP) {
-                u32 row = (u32)(y - SELECTOR_ROW_TOP) / SELECTOR_ROW_HEIGHT;
-                u32 game_index = g_selector_top + row;
-
-                if (row < SELECTOR_VISIBLE_ROWS && game_index < g_game_count)
-                    set_selected_game(game_index);
-            }
-            for (index = 0;
-                 index < sizeof(k_selector_buttons) / sizeof(k_selector_buttons[0]);
-                 ++index) {
-                if (!point_in_button(x, y, &k_selector_buttons[index]))
-                    continue;
-                if (k_selector_buttons[index].key == GAM4980_KEY_UP &&
-                    g_selected_game > 0u) {
-                    set_selected_game(g_selected_game - 1u);
-                } else if (k_selector_buttons[index].key == GAM4980_KEY_DOWN &&
-                           g_selected_game + 1u < g_game_count) {
-                    set_selected_game(g_selected_game + 1u);
-                } else if (k_selector_buttons[index].key == GAM4980_KEY_ENTER) {
-                    g_start_requested = 1;
-                }
-                break;
-            }
-            continue;
-        }
         for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index) {
             if (point_in_button(x, y, &k_buttons[index])) {
                 gam4980_key_down(k_buttons[index].key);
@@ -882,56 +673,6 @@ static u8 packet_key(unsigned index)
         GAM4980_KEY_UP, GAM4980_KEY_EXIT, GAM4980_KEY_ENTER,
     };
     return keys[index];
-}
-
-static int selector_key_repeat(u32 current, u32 pressed, unsigned index)
-{
-    u32 bit = 1u << index;
-
-    if (pressed & bit) {
-        g_hold_frames[index] = 0;
-        return 1;
-    }
-    if (current & bit) {
-        ++g_hold_frames[index];
-        return g_hold_frames[index] >= 12u &&
-               ((g_hold_frames[index] - 12u) % 3u) == 0u;
-    }
-    g_hold_frames[index] = 0;
-    return 0;
-}
-
-static void poll_selector_keys(u32 now)
-{
-    bda_gui_input_packet_t packet;
-    u32 current;
-    u32 pressed;
-    u32 released;
-
-    (void)bda_gui_input_packet(&packet);
-    current = packet_mask(&packet);
-    pressed = current & ~g_previous_keys;
-    released = g_previous_keys & ~current;
-    if (selector_key_repeat(current, pressed, 2u) &&
-        g_selected_game + 1u < g_game_count)
-        set_selected_game(g_selected_game + 1u);
-    if (selector_key_repeat(current, pressed, 3u) && g_selected_game > 0u)
-        set_selected_game(g_selected_game - 1u);
-    if (pressed & (1u << 5))
-        g_start_requested = 1;
-    if (pressed & (1u << 4)) {
-        g_escape_pending = 1;
-        g_escape_down_tick = now;
-    }
-    if (g_escape_pending && (current & (1u << 4)) &&
-        bda_gui_tick_elapsed_25ms(g_escape_down_tick, now) >= ESCAPE_QUIT_TICKS) {
-        log_line("SELECTOR CLOSE");
-        g_close_requested = 1;
-        g_escape_pending = 0;
-    } else if (g_escape_pending && (released & (1u << 4))) {
-        g_escape_pending = 0;
-    }
-    g_previous_keys = current;
 }
 
 static void poll_game_keys(u32 now)
@@ -987,7 +728,6 @@ static int gam_window_proc(bda_handle_t handle, u32 message, u32 wparam, u32 lpa
         if (!g_draw_object)
             g_draw_object = bda_gui_draw_object_create(7);
         g_full_redraw = 1;
-        g_selector_redraw = 1;
     } else if (message == BDA_MSG_DRAW_CONTEXT_DETACH) {
         if (!g_draw_owner || g_draw_owner == handle)
             release_draw_context();
@@ -1000,30 +740,6 @@ static int gam_window_proc(bda_handle_t handle, u32 message, u32 wparam, u32 lpa
     if (message == BDA_MSG_TOUCH_COORDINATE)
         return 1;
     return bda_gui_default_proc(handle, message, wparam, lparam);
-}
-
-static int start_selected_game(void)
-{
-    if (g_selected_game >= g_game_count)
-        return 0;
-    copy_text(g_game_path, g_game_paths[g_selected_game], sizeof(g_game_path));
-    if (load_game(g_game_path) <= 0) {
-        bda_msgbox(k_window_title, "The selected .gam file is invalid or unreadable.");
-        g_start_requested = 0;
-        g_selector_redraw = 1;
-        return 0;
-    }
-    log_line("GAME SELECTED");
-    log_line(g_game_path);
-    log_hex_value("GAME SIZE=", g_loaded_game_size);
-    g_window_mode = WINDOW_MODE_GAME;
-    g_start_requested = 0;
-    g_full_redraw = 1;
-    g_escape_pending = 0;
-    g_frame_count = 0;
-    g_core_frame_phase = 0;
-    bda_memset(g_hold_frames, 0, sizeof(g_hold_frames));
-    return 1;
 }
 
 static int run_window(void)
@@ -1049,10 +765,7 @@ static int run_window(void)
     g_touch_write = 0;
     g_detached = 0;
     g_previous_keys = 0;
-    g_window_mode = g_loaded_game_size ? WINDOW_MODE_GAME : WINDOW_MODE_SELECTOR;
     g_full_redraw = 1;
-    g_selector_redraw = 1;
-    g_start_requested = 0;
     g_escape_pending = 0;
     g_close_requested = 0;
     g_frame_count = 0;
@@ -1089,51 +802,36 @@ static int run_window(void)
 
         drain_touches();
         if (!g_close_requested && elapsed_ticks >= 1u) {
+            int lcd_changed;
+
             last_frame_tick = now;
             if (elapsed_ticks > MAX_CATCHUP_TICKS)
                 elapsed_ticks = MAX_CATCHUP_TICKS;
-            if (g_window_mode == WINDOW_MODE_SELECTOR) {
-                poll_selector_keys(now);
-                if (g_start_requested && start_selected_game()) {
-                    last_save_tick = now;
-                }
-                if (g_window_mode == WINDOW_MODE_SELECTOR && g_selector_redraw) {
-                    if (present_selector())
-                        g_selector_redraw = 0;
-                    else
-                        log_line("SELECTOR PRESENT FAILED");
-                }
-            } else {
-                int lcd_changed;
-
-                poll_game_keys(now);
-                g_core_frame_phase += elapsed_ticks * 60u;
-                while (g_core_frame_phase >= 40u) {
-                    gam4980_step_frame();
-                    g_core_frame_phase -= 40u;
-                }
-                lcd_changed = gam4980_render_frame();
-                g_frame_count += elapsed_ticks;
-                if (g_full_redraw || lcd_changed) {
-                    if (!present_screen())
-                        log_line("PRESENT FAILED");
-                }
+            poll_game_keys(now);
+            g_core_frame_phase += elapsed_ticks * 60u;
+            while (g_core_frame_phase >= 40u) {
+                gam4980_step_frame();
+                g_core_frame_phase -= 40u;
+            }
+            lcd_changed = gam4980_render_frame();
+            g_frame_count += elapsed_ticks;
+            if (g_full_redraw || lcd_changed) {
+                if (!present_screen())
+                    log_line("PRESENT FAILED");
             }
         }
-        if (g_window_mode == WINDOW_MODE_GAME && !g_close_requested &&
+        if (!g_close_requested &&
             bda_gui_tick_elapsed_25ms(last_save_tick, now) >= SAVE_INTERVAL_TICKS) {
             write_save();
             last_save_tick = now;
         }
-        if (g_window_mode == WINDOW_MODE_GAME &&
-            gam4980_shutdown_requested() && !g_core_break_logged) {
+        if (gam4980_shutdown_requested() && !g_core_break_logged) {
             log_hex_value("CORE BRK PC=", gam4980_shutdown_pc());
             log_hex_value("CORE FRAME=", g_frame_count);
             g_core_break_logged = 1;
         }
         if (g_close_requested && close_wait == 0) {
-            if (g_window_mode == WINDOW_MODE_GAME)
-                write_save();
+            write_save();
             (void)bda_gui_frame_stop(g_frame);
             (void)bda_gui_frame_release(g_frame);
         }
@@ -1163,19 +861,28 @@ __attribute__((section(".text.bda_main")))
 int bda_main(void)
 {
     int result = 0;
+    int selector_result;
 
     (void)bda_fs_mkdir(k_data_dir);
+    (void)bda_fs_mkdir(k_game_dir);
     reset_log();
     log_line("START STANDALONE");
-    g_game_path[0] = 0;
     g_save_path[0] = 0;
     g_loaded_game_size = 0;
-    if (!scan_games()) {
-        bda_msgbox(k_window_title, "No .gam files were found in the gam4980 data folder.");
+    selector_result = bda_gui_select_file(
+        &g_file_selector, k_game_selector_path, "gam", "Select GAM"
+    );
+    if (selector_result == BDA_FILE_SELECTOR_CANCELLED) {
+        log_line("GAME SELECTION CANCELLED");
+        goto cleanup;
+    }
+    if (selector_result != BDA_FILE_SELECTOR_SELECTED) {
+        bda_msgbox(k_window_title, "Could not open the .gam file selector.");
         result = -1;
         goto cleanup;
     }
-    log_hex_value("GAMES FOUND=", g_game_count);
+    log_line("GAME SELECTED");
+    log_line(g_file_selector.path);
     if (!allocate_buffers()) {
         bda_msgbox(k_window_title, "Not enough memory (requires about 6.2 MiB).");
         result = -2;
@@ -1196,10 +903,12 @@ int bda_main(void)
         result = -5;
         goto cleanup;
     }
-    if (g_game_count == 1u && !start_selected_game()) {
+    if (load_game(g_file_selector.path) <= 0) {
+        bda_msgbox(k_window_title, "The selected .gam file is invalid or unreadable.");
         result = -6;
         goto cleanup;
     }
+    log_hex_value("GAME SIZE=", g_loaded_game_size);
     if (!run_window()) {
         bda_msgbox(k_window_title, "Could not create the emulator window.");
         result = -7;

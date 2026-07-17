@@ -3,8 +3,8 @@
 BBK 9588 port of the GPLv3 `gam4980` emulator core.
 
 This project is intentionally separate from the SDK examples. It builds a
-standalone `GAM4980.BDA` with its own entry point, icons, game selector, and
-freestanding 9588 payload. It does not read or patch another BDA as a template.
+standalone `GAM4980.BDA` with its own entry point, icons, system file selector,
+and freestanding 9588 payload. It does not read or patch another BDA as a template.
 The payload includes only the parent SDK's formal `sdk/include/bda_sdk.h`; the
 research header and `reverse` include directory are not build dependencies.
 
@@ -19,10 +19,16 @@ research header and `reverse` include directory are not build dependencies.
 
 - The MIPS toolchain bundled or configured by the parent 9588 SDK.
 - A parent SDK revision whose formal include provides the verified heap,
-  seek, directory enumeration, frame lifecycle, and raw RGB565 picture APIs.
+  seek, system file selector, frame lifecycle, and raw RGB565 picture APIs.
 
 Firmware dumps, games, saves, the patched BDA, and other generated artifacts
 must not be committed.
+
+Place `.gam` files in:
+
+```text
+A:\gam4980\
+```
 
 ## Build
 
@@ -33,10 +39,10 @@ python .\gam4980-9588\build.py
 python -m bda_packer.validate .\gam4980-9588\build\GAM4980.BDA
 ```
 
-The application scans `.gam` files only in
-`A:\应用\数据\游戏\gam4980`. A single game starts automatically; when several
-games are present, the built-in selector is shown. The selected game is streamed
-directly into emulated flash, so a second game-sized heap buffer is not required.
+The application opens the firmware's formal system file selector through
+`bda_gui_select_file()`. It defaults to `A:\gam4980\` and filters for `.gam`
+files. The selected game is streamed directly into emulated flash, so a second
+game-sized heap buffer is not required.
 
 ## Rendering and timing
 
