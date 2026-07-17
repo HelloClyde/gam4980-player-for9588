@@ -65,6 +65,11 @@ enum scaling_algorithm {
     SCALE_ALGORITHM_COUNT = 3,
 };
 
+enum input_panel {
+    INPUT_PANEL_GAMEPAD = 0,
+    INPUT_PANEL_KEYBOARD = 1,
+};
+
 static const char k_window_title[] = "GAM4980";
 static const char k_game_dir[] = "A:\\gam4980";
 static const char k_game_selector_path[] = "A:\\gam4980\\";
@@ -79,7 +84,7 @@ static const char k_log_path[] =
 static const char k_config_path[] =
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\GAM4980.CFG";
 
-static const touch_button_t k_buttons[] = {
+static const touch_button_t k_gamepad_buttons[] = {
     { 52, 185, 38, 38, GAM4980_KEY_UP, 0 },
     { 12, 225, 38, 38, GAM4980_KEY_LEFT, 0 },
     { 92, 225, 38, 38, GAM4980_KEY_RIGHT, 0 },
@@ -90,6 +95,60 @@ static const touch_button_t k_buttons[] = {
     { 192, 270, 40, 34, GAM4980_KEY_PAGE_DOWN, "PGDN" },
 };
 
+static const touch_button_t k_keyboard_buttons[] = {
+    {   4, 184, 31, 22, GAM4980_KEY_HELP,   "HELP" },
+    {  37, 184, 31, 22, GAM4980_KEY_SEARCH, "FIND" },
+    {  70, 184, 27, 22, GAM4980_KEY_INSERT, "INS" },
+    {  99, 184, 31, 22, GAM4980_KEY_MODIFY, "EDIT" },
+    { 132, 184, 27, 22, GAM4980_KEY_DELETE, "DEL" },
+    { 161, 184, 31, 22, GAM4980_KEY_EXIT,   "EXIT" },
+    { 194, 184, 42, 22, GAM4980_KEY_ENTER,  "ENTER" },
+
+    {   5, 208, 21, 22, GAM4980_KEY_1, "1" },
+    {  28, 208, 21, 22, GAM4980_KEY_2, "2" },
+    {  51, 208, 21, 22, GAM4980_KEY_3, "3" },
+    {  74, 208, 21, 22, GAM4980_KEY_4, "4" },
+    {  97, 208, 21, 22, GAM4980_KEY_5, "5" },
+    { 120, 208, 21, 22, GAM4980_KEY_6, "6" },
+    { 143, 208, 21, 22, GAM4980_KEY_7, "7" },
+    { 166, 208, 21, 22, GAM4980_KEY_8, "8" },
+    { 189, 208, 21, 22, GAM4980_KEY_9, "9" },
+    { 212, 208, 21, 22, GAM4980_KEY_0, "0" },
+
+    {   5, 232, 21, 22, GAM4980_KEY_Q, "Q" },
+    {  28, 232, 21, 22, GAM4980_KEY_W, "W" },
+    {  51, 232, 21, 22, GAM4980_KEY_E, "E" },
+    {  74, 232, 21, 22, GAM4980_KEY_R, "R" },
+    {  97, 232, 21, 22, GAM4980_KEY_T, "T" },
+    { 120, 232, 21, 22, GAM4980_KEY_Y, "Y" },
+    { 143, 232, 21, 22, GAM4980_KEY_U, "U" },
+    { 166, 232, 21, 22, GAM4980_KEY_I, "I" },
+    { 189, 232, 21, 22, GAM4980_KEY_O, "O" },
+    { 212, 232, 21, 22, GAM4980_KEY_P, "P" },
+
+    {   5, 256, 21, 22, GAM4980_KEY_INPUT, "IME" },
+    {  28, 256, 21, 22, GAM4980_KEY_A, "A" },
+    {  51, 256, 21, 22, GAM4980_KEY_S, "S" },
+    {  74, 256, 21, 22, GAM4980_KEY_D, "D" },
+    {  97, 256, 21, 22, GAM4980_KEY_F, "F" },
+    { 120, 256, 21, 22, GAM4980_KEY_G, "G" },
+    { 143, 256, 21, 22, GAM4980_KEY_H, "H" },
+    { 166, 256, 21, 22, GAM4980_KEY_J, "J" },
+    { 189, 256, 21, 22, GAM4980_KEY_K, "K" },
+    { 212, 256, 21, 22, GAM4980_KEY_L, "L" },
+
+    {   3, 280, 37, 22, GAM4980_KEY_SHIFT, "SHIFT" },
+    {  42, 280, 19, 22, GAM4980_KEY_Z, "Z" },
+    {  63, 280, 19, 22, GAM4980_KEY_X, "X" },
+    {  84, 280, 19, 22, GAM4980_KEY_C, "C" },
+    { 105, 280, 19, 22, GAM4980_KEY_V, "V" },
+    { 126, 280, 19, 22, GAM4980_KEY_B, "B" },
+    { 147, 280, 19, 22, GAM4980_KEY_N, "N" },
+    { 168, 280, 19, 22, GAM4980_KEY_M, "M" },
+    { 189, 280, 48, 22, GAM4980_KEY_SPACE, "SPACE" },
+};
+
+static const ui_rect_t k_input_panel_button = { 172, SETTINGS_ROW_Y, 28, 22 };
 static const ui_rect_t k_settings_button = { 204, SETTINGS_ROW_Y, 28, 22 };
 static const ui_rect_t k_settings_close = { 196, 72, 22, 22 };
 static const ui_rect_t k_settings_options[SCALE_ALGORITHM_COUNT] = {
@@ -153,6 +212,7 @@ static int g_escape_pending;
 static int g_close_requested;
 static int g_core_break_logged;
 static int g_scale_algorithm = SCALE_BILINEAR;
+static int g_input_panel = INPUT_PANEL_GAMEPAD;
 static int g_settings_open;
 static int g_settings_selection;
 static int g_settings_key_release_ticks;
@@ -656,6 +716,32 @@ static void draw_gear_icon(int center_x, int center_y, u16 color, u16 hole)
     fill_rect(center_x - 1, center_y - 1, 3, 3, hole);
 }
 
+static void draw_keyboard_icon(int center_x, int center_y, u16 color)
+{
+    int column;
+
+    fill_rect(center_x - 9, center_y - 7, 19, 2, color);
+    fill_rect(center_x - 9, center_y + 5, 19, 2, color);
+    fill_rect(center_x - 9, center_y - 5, 2, 10, color);
+    fill_rect(center_x + 8, center_y - 5, 2, 10, color);
+    for (column = 0; column < 5; ++column) {
+        fill_rect(center_x - 6 + column * 3, center_y - 3, 2, 2, color);
+        fill_rect(center_x - 6 + column * 3, center_y, 2, 2, color);
+    }
+    fill_rect(center_x - 4, center_y + 3, 9, 1, color);
+}
+
+static void draw_gamepad_icon(int center_x, int center_y, u16 color, u16 hole)
+{
+    fill_rect(center_x - 7, center_y - 5, 15, 9, color);
+    fill_rect(center_x - 9, center_y - 2, 4, 8, color);
+    fill_rect(center_x + 6, center_y - 2, 4, 8, color);
+    fill_rect(center_x - 5, center_y - 1, 5, 2, hole);
+    fill_rect(center_x - 3, center_y - 3, 2, 6, hole);
+    fill_rect(center_x + 2, center_y - 1, 2, 2, hole);
+    fill_rect(center_x + 5, center_y - 3, 2, 2, hole);
+}
+
 static void draw_close_icon(const ui_rect_t *rect, u16 color)
 {
     int index;
@@ -687,15 +773,33 @@ static void draw_settings_row(void)
 {
     u16 border = rgb565(55, 76, 84);
     u16 fill = rgb565(17, 31, 39);
-    u16 muted = rgb565(146, 164, 170);
     u16 text = rgb565(238, 244, 239);
     u16 accent = rgb565(41, 178, 178);
-    int text_y = SETTINGS_ROW_Y + (SETTINGS_ROW_HEIGHT - 7) / 2;
 
     fill_rect(8, SETTINGS_ROW_Y, 224, SETTINGS_ROW_HEIGHT, border);
-    fill_rect(10, SETTINGS_ROW_Y + 2, 192, SETTINGS_ROW_HEIGHT - 4, fill);
-    draw_text(14, text_y, "SCALE", 1, muted);
-    draw_text(51, text_y, k_algorithm_names[g_scale_algorithm], 1, text);
+    fill_rect(10, SETTINGS_ROW_Y + 2, 220, SETTINGS_ROW_HEIGHT - 4, fill);
+
+    fill_rect(
+        k_input_panel_button.x, k_input_panel_button.y,
+        k_input_panel_button.width, k_input_panel_button.height, accent
+    );
+    fill_rect(
+        k_input_panel_button.x + 2, k_input_panel_button.y + 2,
+        k_input_panel_button.width - 4, k_input_panel_button.height - 4, fill
+    );
+    if (g_input_panel == INPUT_PANEL_GAMEPAD) {
+        draw_keyboard_icon(
+            k_input_panel_button.x + k_input_panel_button.width / 2,
+            k_input_panel_button.y + k_input_panel_button.height / 2,
+            text
+        );
+    } else {
+        draw_gamepad_icon(
+            k_input_panel_button.x + k_input_panel_button.width / 2,
+            k_input_panel_button.y + k_input_panel_button.height / 2,
+            text, fill
+        );
+    }
 
     fill_rect(
         k_settings_button.x, k_settings_button.y,
@@ -864,6 +968,8 @@ static void render_game_screen(const u16 *source)
 {
     u16 background = rgb565(10, 20, 27);
     u16 frame = rgb565(238, 177, 45);
+    const touch_button_t *buttons;
+    u32 button_count;
     u32 index;
 
     fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, background);
@@ -873,8 +979,17 @@ static void render_game_screen(const u16 *source)
     scale_lcd_to_view(source);
     copy_lcd_to_full_screen();
     draw_settings_row();
-    for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index)
-        draw_button(&k_buttons[index]);
+    if (g_input_panel == INPUT_PANEL_KEYBOARD) {
+        buttons = k_keyboard_buttons;
+        button_count = sizeof(k_keyboard_buttons) /
+            sizeof(k_keyboard_buttons[0]);
+    } else {
+        buttons = k_gamepad_buttons;
+        button_count = sizeof(k_gamepad_buttons) /
+            sizeof(k_gamepad_buttons[0]);
+    }
+    for (index = 0; index < button_count; ++index)
+        draw_button(&buttons[index]);
     if (g_settings_open)
         draw_settings_overlay();
 }
@@ -1000,6 +1115,14 @@ static void apply_scaling_selection(void)
     close_settings();
 }
 
+static void toggle_input_panel(void)
+{
+    g_input_panel = g_input_panel == INPUT_PANEL_GAMEPAD ?
+        INPUT_PANEL_KEYBOARD : INPUT_PANEL_GAMEPAD;
+    clear_frame_queue();
+    g_full_redraw = 1;
+}
+
 static void queue_touch(u32 packed)
 {
     u32 next = (g_touch_write + 1u) % TOUCH_QUEUE_SIZE;
@@ -1015,6 +1138,8 @@ static void drain_touches(void)
         u32 packed = g_touch_queue[g_touch_read];
         int x = (s32)(short)(packed & 0xffffu);
         int y = (s32)(short)(packed >> 16);
+        const touch_button_t *buttons;
+        u32 button_count;
         u32 index;
 
         g_touch_read = (g_touch_read + 1u) % TOUCH_QUEUE_SIZE;
@@ -1032,14 +1157,27 @@ static void drain_touches(void)
             }
             continue;
         }
+        if (point_in_rect(x, y, &k_input_panel_button)) {
+            toggle_input_panel();
+            continue;
+        }
         if (point_in_rect(x, y, &k_settings_button)) {
             open_settings();
             continue;
         }
-        for (index = 0; index < sizeof(k_buttons) / sizeof(k_buttons[0]); ++index) {
-            if (point_in_button(x, y, &k_buttons[index])) {
+        if (g_input_panel == INPUT_PANEL_KEYBOARD) {
+            buttons = k_keyboard_buttons;
+            button_count = sizeof(k_keyboard_buttons) /
+                sizeof(k_keyboard_buttons[0]);
+        } else {
+            buttons = k_gamepad_buttons;
+            button_count = sizeof(k_gamepad_buttons) /
+                sizeof(k_gamepad_buttons[0]);
+        }
+        for (index = 0; index < button_count; ++index) {
+            if (point_in_button(x, y, &buttons[index])) {
                 clear_frame_queue();
-                gam4980_key_down(k_buttons[index].key);
+                gam4980_key_down(buttons[index].key);
                 break;
             }
         }
@@ -1203,6 +1341,7 @@ static int run_window(void)
     g_frame_count = 0;
     g_core_frame_phase = 0;
     g_core_break_logged = 0;
+    g_input_panel = INPUT_PANEL_GAMEPAD;
     g_settings_open = 0;
     g_settings_selection = g_scale_algorithm;
     g_settings_key_release_ticks = 0;
