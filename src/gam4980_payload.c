@@ -361,9 +361,12 @@ static int g_ghost_frame_valid;
 static int g_ghost_fade_pending;
 static int g_keyboard_page = KEYBOARD_PAGE_ALPHA;
 static const touch_button_t *g_touch_button;
-static u32 g_touch_hold_ticks;
+static u32 g_touch_repeat_tick;
 static int g_touch_key_active;
 static int g_touch_had_key;
+static int g_touch_repeat_fired;
+static int g_touch_contact_down;
+static int g_touch_escape_suppressed;
 static int g_settings_open;
 static int g_settings_tab = SETTINGS_TAB_DISPLAY;
 static int g_settings_selection;
@@ -1673,13 +1676,14 @@ static int point_in_rect(int x, int y, const ui_rect_t *rect)
 }
 
 static u32 packet_mask(const bda_gui_input_packet_t *packet);
+static u32 filter_touch_escape(u32 mask);
 
 static void sync_previous_keys(void)
 {
     bda_gui_input_packet_t packet;
 
     (void)bda_gui_input_packet(&packet);
-    g_previous_keys = packet_mask(&packet);
+    g_previous_keys = filter_touch_escape(packet_mask(&packet));
 }
 
 static void release_touch_key(void)
@@ -1687,8 +1691,10 @@ static void release_touch_key(void)
     if (g_touch_key_active)
         g_full_redraw = 1;
     g_touch_button = 0;
-    g_touch_hold_ticks = 0;
+    g_touch_repeat_tick = 0;
     g_touch_key_active = 0;
+    g_touch_had_key = 0;
+    g_touch_repeat_fired = 0;
 }
 
 static const touch_button_t *find_touch_button(int x, int y)
@@ -1707,15 +1713,19 @@ static const touch_button_t *find_touch_button(int x, int y)
 
 static void press_touch_button(const touch_button_t *button)
 {
-    if (g_touch_key_active && g_touch_button == button)
+    if (g_touch_had_key) {
+        int active = g_touch_button == button;
+
+        if (g_touch_key_active != active)
+            g_full_redraw = 1;
+        g_touch_key_active = active;
         return;
-    release_touch_key();
-    clear_frame_queue();
-    gam4980_key_down(button->key);
+    }
     g_touch_button = button;
-    g_touch_hold_ticks = 0;
+    g_touch_repeat_tick = bda_gui_tick_count_25ms();
     g_touch_key_active = 1;
     g_touch_had_key = 1;
+    g_touch_repeat_fired = 0;
     g_full_redraw = 1;
 }
 
@@ -1931,7 +1941,6 @@ static void queue_touch(u32 message, u32 packed)
 
 static void handle_touch_release(int x, int y)
 {
-    const touch_button_t *button;
     u32 index;
 
     if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT)
@@ -1977,11 +1986,6 @@ static void handle_touch_release(int x, int y)
         open_settings();
         return;
     }
-    button = find_touch_button(x, y);
-    if (button) {
-        clear_frame_queue();
-        gam4980_key_down(button->key);
-    }
 }
 
 static void drain_touches(void)
@@ -1994,37 +1998,51 @@ static void drain_touches(void)
         g_touch_read = (g_touch_read + 1u) % TOUCH_QUEUE_SIZE;
         if (event.message == BDA_MSG_TOUCH_COORDINATE) {
             const touch_button_t *button = 0;
+
+            g_touch_contact_down = 1;
+            g_touch_escape_suppressed = 1;
             if (!g_settings_open && x >= 0 && x < SCREEN_WIDTH &&
                 y >= 0 && y < SCREEN_HEIGHT)
                 button = find_touch_button(x, y);
-            if (button)
+            if (button) {
                 press_touch_button(button);
-            else
-                release_touch_key();
+            } else if (g_touch_had_key && g_touch_key_active) {
+                g_touch_key_active = 0;
+                g_full_redraw = 1;
+            }
         } else if (event.message == BDA_MSG_TOUCH_RELEASE) {
-            int had_key = g_touch_had_key;
+            const touch_button_t *button = g_touch_button;
+            int activate = button && g_touch_key_active &&
+                !g_touch_repeat_fired;
+
+            g_touch_contact_down = 0;
+            g_touch_escape_suppressed = 1;
             release_touch_key();
-            g_touch_had_key = 0;
-            if (!had_key)
+            if (activate) {
+                clear_frame_queue();
+                gam4980_key_down(button->key);
+            } else if (!button) {
                 handle_touch_release(x, y);
+            }
         }
     }
 }
 
-static void poll_touch_repeat(u32 elapsed_ticks)
+static void poll_touch_repeat(u32 now)
 {
+    u32 interval;
+
     if (!g_touch_key_active || !g_touch_button ||
         !g_touch_button->repeat)
         return;
-    g_touch_hold_ticks += elapsed_ticks;
-    if (g_touch_hold_ticks >= TOUCH_REPEAT_DELAY_TICKS) {
-        clear_frame_queue();
-        gam4980_key_down(g_touch_button->key);
-        g_touch_hold_ticks = TOUCH_REPEAT_DELAY_TICKS -
-            TOUCH_REPEAT_INTERVAL_TICKS +
-            ((g_touch_hold_ticks - TOUCH_REPEAT_DELAY_TICKS) %
-             TOUCH_REPEAT_INTERVAL_TICKS);
-    }
+    interval = g_touch_repeat_fired ? TOUCH_REPEAT_INTERVAL_TICKS :
+        TOUCH_REPEAT_DELAY_TICKS;
+    if (bda_gui_tick_elapsed_25ms(g_touch_repeat_tick, now) < interval)
+        return;
+    clear_frame_queue();
+    gam4980_key_down(g_touch_button->key);
+    g_touch_repeat_fired = 1;
+    g_touch_repeat_tick = now;
 }
 
 static u32 packet_mask(const bda_gui_input_packet_t *packet)
@@ -2037,6 +2055,20 @@ static u32 packet_mask(const bda_gui_input_packet_t *packet)
     if (packet->bytes[BDA_INPUT_PACKET_ESCAPE_INDEX] == 1u) mask |= 1u << 4;
     if (packet->bytes[BDA_INPUT_PACKET_ENTER_INDEX] == 1u) mask |= 1u << 5;
     return mask;
+}
+
+static u32 filter_touch_escape(u32 mask)
+{
+    const u32 escape_bit = 1u << 4;
+
+    /* A 9588 touch contact also raises the polled Escape packet byte. */
+    if (!g_touch_escape_suppressed)
+        return mask;
+    if (!g_touch_contact_down && !(mask & escape_bit))
+        g_touch_escape_suppressed = 0;
+    g_escape_pending = 0;
+    g_previous_keys &= ~escape_bit;
+    return mask & ~escape_bit;
 }
 
 static u8 packet_key(unsigned index)
@@ -2057,10 +2089,9 @@ static void poll_game_keys(u32 now)
     unsigned index;
 
     (void)bda_gui_input_packet(&packet);
-    current = packet_mask(&packet);
+    current = filter_touch_escape(packet_mask(&packet));
     pressed = current & ~g_previous_keys;
     released = g_previous_keys & ~current;
-
     for (index = 0; index < 6; ++index) {
         u32 bit = 1u << index;
         if (index == 4)
@@ -2105,7 +2136,7 @@ static void poll_settings_keys(void)
     int item_count;
 
     (void)bda_gui_input_packet(&packet);
-    current = packet_mask(&packet);
+    current = filter_touch_escape(packet_mask(&packet));
     if (g_settings_key_release_ticks < 4) {
         if (current == 0)
             ++g_settings_key_release_ticks;
@@ -2184,9 +2215,12 @@ static int run_window(void)
     g_touch_read = 0;
     g_touch_write = 0;
     g_touch_button = 0;
-    g_touch_hold_ticks = 0;
+    g_touch_repeat_tick = 0;
     g_touch_key_active = 0;
     g_touch_had_key = 0;
+    g_touch_repeat_fired = 0;
+    g_touch_contact_down = 0;
+    g_touch_escape_suppressed = 0;
     g_detached = 0;
     g_previous_keys = 0;
     g_full_redraw = 1;
@@ -2244,7 +2278,7 @@ static int run_window(void)
             } else {
                 const u8 *queued_frame;
 
-                poll_touch_repeat(elapsed_ticks);
+                poll_touch_repeat(now);
                 poll_game_keys(now);
                 if (elapsed_ticks >= g_frame_present_hold_ticks)
                     g_frame_present_hold_ticks = 0;
