@@ -977,12 +977,30 @@ static void draw_button(const touch_button_t *button)
 
 static void draw_gear_icon(int center_x, int center_y, u16 color, u16 hole)
 {
-    fill_rect(center_x - 4, center_y - 4, 9, 9, color);
-    fill_rect(center_x - 2, center_y - 6, 5, 2, color);
-    fill_rect(center_x - 2, center_y + 5, 5, 2, color);
-    fill_rect(center_x - 6, center_y - 2, 2, 5, color);
-    fill_rect(center_x + 5, center_y - 2, 2, 5, color);
-    fill_rect(center_x - 1, center_y - 1, 3, 3, hole);
+    fill_rect(center_x - 1, center_y - 8, 3, 2, color);
+    fill_rect(center_x - 6, center_y - 6, 3, 1, color);
+    fill_rect(center_x - 1, center_y - 6, 3, 1, color);
+    fill_rect(center_x + 4, center_y - 6, 3, 1, color);
+    fill_rect(center_x - 6, center_y - 5, 13, 3, color);
+    fill_rect(center_x - 6, center_y - 2, 5, 1, color);
+    fill_rect(center_x + 2, center_y - 2, 5, 1, color);
+    fill_rect(center_x - 8, center_y - 1, 6, 1, color);
+    fill_rect(center_x + 3, center_y - 1, 6, 1, color);
+    fill_rect(center_x - 8, center_y, 5, 1, color);
+    fill_rect(center_x + 4, center_y, 5, 1, color);
+    fill_rect(center_x - 8, center_y + 1, 6, 1, color);
+    fill_rect(center_x + 3, center_y + 1, 6, 1, color);
+    fill_rect(center_x - 6, center_y + 2, 5, 1, color);
+    fill_rect(center_x + 2, center_y + 2, 5, 1, color);
+    fill_rect(center_x - 6, center_y + 3, 13, 3, color);
+    fill_rect(center_x - 6, center_y + 6, 3, 1, color);
+    fill_rect(center_x - 1, center_y + 6, 3, 1, color);
+    fill_rect(center_x + 4, center_y + 6, 3, 1, color);
+    fill_rect(center_x - 1, center_y + 7, 3, 2, color);
+
+    fill_rect(center_x - 1, center_y - 2, 3, 5, hole);
+    fill_rect(center_x - 2, center_y - 1, 5, 3, hole);
+    fill_rect(center_x - 3, center_y, 7, 1, hole);
 }
 
 static void draw_keyboard_icon(int center_x, int center_y, u16 color)
