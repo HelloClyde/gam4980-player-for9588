@@ -29,6 +29,7 @@ void *memset(void *destination, int value, bda_size_t size)
 #define PCM_BYTE_COUNT (PCM_SAMPLE_COUNT * (u32)sizeof(s16))
 #define PCM_PREFILL_BLOCK_COUNT 4u
 #define PCM_PUMP_BLOCK_LIMIT 4u
+#define PCM_STOP_DRAIN_TICKS 20u
 
 #define VIEW_X 0
 #define VIEW_Y 9
@@ -444,10 +445,21 @@ static void reset_log(void)
 
 static void audio_stream_stop(void)
 {
+    u32 drain_start;
+
     if (!g_audio_open)
         return;
-    bda_audio_stop();
     g_audio_open = 0;
+    log_line("AUDIO DRAIN");
+    drain_start = bda_gui_tick_count_25ms();
+    while (bda_gui_tick_elapsed_25ms(
+               drain_start, bda_gui_tick_count_25ms()
+           ) < PCM_STOP_DRAIN_TICKS) {
+        bda_sys_delay(1u);
+    }
+    log_line("AUDIO STOP CALL");
+    bda_audio_stop();
+    log_line("AUDIO STOP RETURNED");
     log_hex_value("AUDIO BLOCKS=", g_audio_blocks_written);
     log_hex_value("AUDIO ERRORS=", g_audio_write_errors);
     log_hex_value("AUDIO PADDED=", g_audio_padded_samples);
@@ -1792,7 +1804,6 @@ static void confirm_change_game(void)
     sync_previous_keys();
     clear_frame_queue();
     g_touch_read = g_touch_write;
-    audio_stream_stop();
     result = bda_confirm(k_window_title, "Select another game?");
     g_touch_read = g_touch_write;
     sync_previous_keys();
@@ -1800,7 +1811,6 @@ static void confirm_change_game(void)
         request_session_action(SESSION_ACTION_CHANGE_GAME);
     } else {
         log_line("GAME CHANGE NOT CONFIRMED");
-        audio_stream_start();
         g_full_redraw = 1;
     }
 }
@@ -1815,8 +1825,8 @@ static void show_help_page(void)
     g_touch_read = g_touch_write;
     g_escape_pending = 0;
     log_line("HELP PAGE REQUESTED");
-    audio_stream_stop();
     release_draw_context();
+    log_line("HELP PAGE CALL");
     result = bda_help_page(0, k_help_title, k_help_body);
     if (result != BDA_HELP_PAGE_COMPLETED) {
         log_line("HELP PAGE ERROR");
@@ -1834,7 +1844,6 @@ static void show_help_page(void)
         else
             log_line("HELP DRAW RESTORED");
     }
-    audio_stream_start();
 }
 
 static void cycle_lcd_theme(void)
@@ -2324,7 +2333,7 @@ static int run_window(void)
                 }
             }
         }
-        if (g_audio_enabled && g_audio_open)
+        if (!g_close_requested && g_audio_enabled && g_audio_open)
             audio_stream_pump();
         else
             audio_discard_core();
