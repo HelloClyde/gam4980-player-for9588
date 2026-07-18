@@ -16,6 +16,8 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
 
     steps:
       - name: Check out player repository
