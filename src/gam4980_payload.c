@@ -1,4 +1,4 @@
-#include "bda_sdk.h"
+#include "bda_audio.h"
 #include "gam4980_core.h"
 
 /* GCC may lower small initialized-array copies to these freestanding symbols. */
@@ -24,6 +24,11 @@ void *memset(void *destination, int value, bda_size_t size)
     (GAM4980_LCD_PACKED_SIZE * FRAME_QUEUE_CAPACITY)
 #define FRAME_PRESENT_HOLD_TICKS 3u
 
+#define PCM_SAMPLE_COUNT 512u
+#define PCM_BYTE_COUNT (PCM_SAMPLE_COUNT * (u32)sizeof(s16))
+#define PCM_PREFILL_BLOCK_COUNT 4u
+#define PCM_PUMP_BLOCK_LIMIT 4u
+
 #define VIEW_X 0
 #define VIEW_Y 9
 #define VIEW_WIDTH SCREEN_WIDTH
@@ -33,6 +38,8 @@ void *memset(void *destination, int value, bda_size_t size)
 #define SETTINGS_ROW_HEIGHT 22
 
 #define TOUCH_QUEUE_SIZE 16u
+#define TOUCH_REPEAT_DELAY_TICKS 12u
+#define TOUCH_REPEAT_INTERVAL_TICKS 3u
 #define ESCAPE_QUIT_TICKS 40u
 #define SAVE_INTERVAL_TICKS 400u
 #define MAX_CATCHUP_TICKS 8u
@@ -44,7 +51,13 @@ typedef struct touch_button {
     s32 height;
     u8 key;
     const char *label;
+    u8 repeat;
 } touch_button_t;
+
+typedef struct touch_event {
+    u32 message;
+    u32 packed;
+} touch_event_t;
 
 typedef struct ui_rect {
     s32 x;
@@ -70,6 +83,25 @@ enum input_panel {
     INPUT_PANEL_KEYBOARD = 1,
 };
 
+enum keyboard_page {
+    KEYBOARD_PAGE_ALPHA = 0,
+    KEYBOARD_PAGE_FUNCTION = 1,
+};
+
+enum settings_item {
+    SETTINGS_ITEM_LCD_THEME = SCALE_ALGORITHM_COUNT,
+    SETTINGS_ITEM_LCD_GHOSTING,
+    SETTINGS_ITEM_RESTART,
+    SETTINGS_ITEM_CHANGE_GAME,
+    SETTINGS_ITEM_COUNT,
+};
+
+enum session_action {
+    SESSION_ACTION_EXIT = 0,
+    SESSION_ACTION_RESTART,
+    SESSION_ACTION_CHANGE_GAME,
+};
+
 static const char k_window_title[] = "GAM4980";
 static const char k_game_dir[] = "A:\\gam4980";
 static const char k_game_selector_path[] = "A:\\gam4980\\";
@@ -85,79 +117,110 @@ static const char k_config_path[] =
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\GAM4980.CFG";
 
 static const touch_button_t k_gamepad_buttons[] = {
-    { 52, 185, 38, 38, GAM4980_KEY_UP, 0 },
-    { 12, 225, 38, 38, GAM4980_KEY_LEFT, 0 },
-    { 92, 225, 38, 38, GAM4980_KEY_RIGHT, 0 },
-    { 52, 265, 38, 38, GAM4980_KEY_DOWN, 0 },
-    { 148, 185, 84, 43, GAM4980_KEY_ENTER, "ENTER" },
-    { 148, 232, 84, 34, GAM4980_KEY_EXIT, "EXIT" },
-    { 148, 270, 40, 34, GAM4980_KEY_PAGE_UP, "PGUP" },
-    { 192, 270, 40, 34, GAM4980_KEY_PAGE_DOWN, "PGDN" },
+    { 52, 185, 38, 38, GAM4980_KEY_UP, 0, 1 },
+    { 12, 225, 38, 38, GAM4980_KEY_LEFT, 0, 1 },
+    { 92, 225, 38, 38, GAM4980_KEY_RIGHT, 0, 1 },
+    { 52, 265, 38, 38, GAM4980_KEY_DOWN, 0, 1 },
+    { 148, 185, 84, 43, GAM4980_KEY_ENTER, "ENTER", 0 },
+    { 148, 232, 84, 34, GAM4980_KEY_EXIT, "EXIT", 0 },
+    { 148, 270, 40, 34, GAM4980_KEY_PAGE_UP, "PGUP", 1 },
+    { 192, 270, 40, 34, GAM4980_KEY_PAGE_DOWN, "PGDN", 1 },
 };
 
-static const touch_button_t k_keyboard_buttons[] = {
-    {   4, 184, 31, 22, GAM4980_KEY_HELP,   "HELP" },
-    {  37, 184, 31, 22, GAM4980_KEY_SEARCH, "FIND" },
-    {  70, 184, 27, 22, GAM4980_KEY_INSERT, "INS" },
-    {  99, 184, 31, 22, GAM4980_KEY_MODIFY, "EDIT" },
-    { 132, 184, 27, 22, GAM4980_KEY_DELETE, "DEL" },
-    { 161, 184, 31, 22, GAM4980_KEY_EXIT,   "EXIT" },
-    { 194, 184, 42, 22, GAM4980_KEY_ENTER,  "ENTER" },
+static const touch_button_t k_alpha_keyboard_buttons[] = {
+    {   4, 184, 31, 22, GAM4980_KEY_HELP,   "HELP", 0 },
+    {  37, 184, 31, 22, GAM4980_KEY_SEARCH, "FIND", 0 },
+    {  70, 184, 27, 22, GAM4980_KEY_INSERT, "INS",  0 },
+    {  99, 184, 31, 22, GAM4980_KEY_MODIFY, "EDIT", 0 },
+    { 132, 184, 27, 22, GAM4980_KEY_DELETE, "DEL",  1 },
+    { 161, 184, 31, 22, GAM4980_KEY_EXIT,   "EXIT", 0 },
+    { 194, 184, 42, 22, GAM4980_KEY_ENTER,  "ENTER", 0 },
 
-    {   5, 208, 21, 22, GAM4980_KEY_1, "1" },
-    {  28, 208, 21, 22, GAM4980_KEY_2, "2" },
-    {  51, 208, 21, 22, GAM4980_KEY_3, "3" },
-    {  74, 208, 21, 22, GAM4980_KEY_4, "4" },
-    {  97, 208, 21, 22, GAM4980_KEY_5, "5" },
-    { 120, 208, 21, 22, GAM4980_KEY_6, "6" },
-    { 143, 208, 21, 22, GAM4980_KEY_7, "7" },
-    { 166, 208, 21, 22, GAM4980_KEY_8, "8" },
-    { 189, 208, 21, 22, GAM4980_KEY_9, "9" },
-    { 212, 208, 21, 22, GAM4980_KEY_0, "0" },
+    {   5, 208, 21, 22, GAM4980_KEY_1, "1", 1 },
+    {  28, 208, 21, 22, GAM4980_KEY_2, "2", 1 },
+    {  51, 208, 21, 22, GAM4980_KEY_3, "3", 1 },
+    {  74, 208, 21, 22, GAM4980_KEY_4, "4", 1 },
+    {  97, 208, 21, 22, GAM4980_KEY_5, "5", 1 },
+    { 120, 208, 21, 22, GAM4980_KEY_6, "6", 1 },
+    { 143, 208, 21, 22, GAM4980_KEY_7, "7", 1 },
+    { 166, 208, 21, 22, GAM4980_KEY_8, "8", 1 },
+    { 189, 208, 21, 22, GAM4980_KEY_9, "9", 1 },
+    { 212, 208, 21, 22, GAM4980_KEY_0, "0", 1 },
 
-    {   5, 232, 21, 22, GAM4980_KEY_Q, "Q" },
-    {  28, 232, 21, 22, GAM4980_KEY_W, "W" },
-    {  51, 232, 21, 22, GAM4980_KEY_E, "E" },
-    {  74, 232, 21, 22, GAM4980_KEY_R, "R" },
-    {  97, 232, 21, 22, GAM4980_KEY_T, "T" },
-    { 120, 232, 21, 22, GAM4980_KEY_Y, "Y" },
-    { 143, 232, 21, 22, GAM4980_KEY_U, "U" },
-    { 166, 232, 21, 22, GAM4980_KEY_I, "I" },
-    { 189, 232, 21, 22, GAM4980_KEY_O, "O" },
-    { 212, 232, 21, 22, GAM4980_KEY_P, "P" },
+    {   5, 232, 21, 22, GAM4980_KEY_Q, "Q", 1 },
+    {  28, 232, 21, 22, GAM4980_KEY_W, "W", 1 },
+    {  51, 232, 21, 22, GAM4980_KEY_E, "E", 1 },
+    {  74, 232, 21, 22, GAM4980_KEY_R, "R", 1 },
+    {  97, 232, 21, 22, GAM4980_KEY_T, "T", 1 },
+    { 120, 232, 21, 22, GAM4980_KEY_Y, "Y", 1 },
+    { 143, 232, 21, 22, GAM4980_KEY_U, "U", 1 },
+    { 166, 232, 21, 22, GAM4980_KEY_I, "I", 1 },
+    { 189, 232, 21, 22, GAM4980_KEY_O, "O", 1 },
+    { 212, 232, 21, 22, GAM4980_KEY_P, "P", 1 },
 
-    {   5, 256, 21, 22, GAM4980_KEY_INPUT, "IME" },
-    {  28, 256, 21, 22, GAM4980_KEY_A, "A" },
-    {  51, 256, 21, 22, GAM4980_KEY_S, "S" },
-    {  74, 256, 21, 22, GAM4980_KEY_D, "D" },
-    {  97, 256, 21, 22, GAM4980_KEY_F, "F" },
-    { 120, 256, 21, 22, GAM4980_KEY_G, "G" },
-    { 143, 256, 21, 22, GAM4980_KEY_H, "H" },
-    { 166, 256, 21, 22, GAM4980_KEY_J, "J" },
-    { 189, 256, 21, 22, GAM4980_KEY_K, "K" },
-    { 212, 256, 21, 22, GAM4980_KEY_L, "L" },
+    {   5, 256, 21, 22, GAM4980_KEY_INPUT, "IME", 0 },
+    {  28, 256, 21, 22, GAM4980_KEY_A, "A", 1 },
+    {  51, 256, 21, 22, GAM4980_KEY_S, "S", 1 },
+    {  74, 256, 21, 22, GAM4980_KEY_D, "D", 1 },
+    {  97, 256, 21, 22, GAM4980_KEY_F, "F", 1 },
+    { 120, 256, 21, 22, GAM4980_KEY_G, "G", 1 },
+    { 143, 256, 21, 22, GAM4980_KEY_H, "H", 1 },
+    { 166, 256, 21, 22, GAM4980_KEY_J, "J", 1 },
+    { 189, 256, 21, 22, GAM4980_KEY_K, "K", 1 },
+    { 212, 256, 21, 22, GAM4980_KEY_L, "L", 1 },
 
-    {   3, 280, 37, 22, GAM4980_KEY_SHIFT, "SHIFT" },
-    {  42, 280, 19, 22, GAM4980_KEY_Z, "Z" },
-    {  63, 280, 19, 22, GAM4980_KEY_X, "X" },
-    {  84, 280, 19, 22, GAM4980_KEY_C, "C" },
-    { 105, 280, 19, 22, GAM4980_KEY_V, "V" },
-    { 126, 280, 19, 22, GAM4980_KEY_B, "B" },
-    { 147, 280, 19, 22, GAM4980_KEY_N, "N" },
-    { 168, 280, 19, 22, GAM4980_KEY_M, "M" },
-    { 189, 280, 48, 22, GAM4980_KEY_SPACE, "SPACE" },
+    {   3, 280, 37, 22, GAM4980_KEY_SHIFT, "SHIFT", 0 },
+    {  42, 280, 19, 22, GAM4980_KEY_Z, "Z", 1 },
+    {  63, 280, 19, 22, GAM4980_KEY_X, "X", 1 },
+    {  84, 280, 19, 22, GAM4980_KEY_C, "C", 1 },
+    { 105, 280, 19, 22, GAM4980_KEY_V, "V", 1 },
+    { 126, 280, 19, 22, GAM4980_KEY_B, "B", 1 },
+    { 147, 280, 19, 22, GAM4980_KEY_N, "N", 1 },
+    { 168, 280, 19, 22, GAM4980_KEY_M, "M", 1 },
+    { 189, 280, 48, 22, GAM4980_KEY_SPACE, "SPACE", 1 },
 };
 
+static const touch_button_t k_function_keyboard_buttons[] = {
+    {   4, 184, 55, 27, GAM4980_KEY_POWER,    "POWER", 0 },
+    {  63, 184, 55, 27, GAM4980_KEY_MENU,     "MENU",  0 },
+    { 122, 184, 55, 27, GAM4980_KEY_EC_SJ,    "SJ",    0 },
+    { 181, 184, 55, 27, GAM4980_KEY_EC_SW,    "SW",    0 },
+    {   4, 215, 55, 27, GAM4980_KEY_CE,       "CE",    0 },
+    {  63, 215, 55, 27, GAM4980_KEY_DIALOG,   "DLG",   0 },
+    { 122, 215, 55, 27, GAM4980_KEY_DOWNLOAD, "LOAD",  0 },
+    { 181, 215, 55, 27, GAM4980_KEY_SPEAK,    "SPK",   0 },
+    {   4, 246, 55, 27, GAM4980_KEY_HELP,     "HELP",  0 },
+    {  63, 246, 55, 27, GAM4980_KEY_SEARCH,   "FIND",  0 },
+    { 122, 246, 55, 27, GAM4980_KEY_INSERT,   "INS",   0 },
+    { 181, 246, 55, 27, GAM4980_KEY_MODIFY,   "EDIT",  0 },
+    {   4, 277, 44, 27, GAM4980_KEY_DELETE,   "DEL",   1 },
+    {  51, 277, 44, 27, GAM4980_KEY_EXIT,     "EXIT",  0 },
+    {  98, 277, 44, 27, GAM4980_KEY_ENTER,    "ENTER", 0 },
+    { 145, 277, 44, 27, GAM4980_KEY_PAGE_UP,  "PGUP",  1 },
+    { 192, 277, 44, 27, GAM4980_KEY_PAGE_DOWN,"PGDN",  1 },
+};
+
+static const ui_rect_t k_keyboard_page_button = { 136, SETTINGS_ROW_Y, 32, 22 };
 static const ui_rect_t k_input_panel_button = { 172, SETTINGS_ROW_Y, 28, 22 };
 static const ui_rect_t k_settings_button = { 204, SETTINGS_ROW_Y, 28, 22 };
-static const ui_rect_t k_settings_close = { 196, 72, 22, 22 };
-static const ui_rect_t k_settings_options[SCALE_ALGORITHM_COUNT] = {
-    { 28, 108, 184, 34 },
-    { 28, 151, 184, 34 },
-    { 28, 194, 184, 34 },
+static const ui_rect_t k_settings_close = { 196, 26, 22, 22 };
+static const ui_rect_t k_settings_options[SETTINGS_ITEM_COUNT] = {
+    { 28, 57, 184, 28 },
+    { 28, 89, 184, 28 },
+    { 28, 121, 184, 28 },
+    { 28, 153, 184, 28 },
+    { 28, 185, 184, 28 },
+    { 28, 225, 184, 28 },
+    { 28, 259, 184, 28 },
 };
 static const char *const k_algorithm_names[SCALE_ALGORITHM_COUNT] = {
     "NEAREST", "BILINEAR", "NATIVE",
+};
+static const char *const k_lcd_theme_names[GAM4980_LCD_THEME_COUNT] = {
+    "OFF", "GREEN", "BLUE", "YELLOW",
+};
+static const char *const k_settings_command_names[] = {
+    "RESTART GAME", "CHANGE GAME",
 };
 
 static const u8 k_font[36][7] = {
@@ -187,12 +250,13 @@ static bda_gui_picture_t g_lcd_picture;
 static bda_gui_picture_t g_full_picture;
 static u16 *g_scaled_framebuffer;
 static u16 *g_screen_pixels;
+static u16 *g_ghost_framebuffer;
 static u8 *g_frame_queue;
 static bda_handle_t g_frame;
 static bda_handle_t g_draw;
 static bda_handle_t g_draw_owner;
 static void *g_draw_object;
-static u32 g_touch_queue[TOUCH_QUEUE_SIZE];
+static touch_event_t g_touch_queue[TOUCH_QUEUE_SIZE];
 static volatile u32 g_touch_read;
 static volatile u32 g_touch_write;
 static volatile int g_detached;
@@ -213,14 +277,29 @@ static int g_close_requested;
 static int g_core_break_logged;
 static int g_scale_algorithm = SCALE_BILINEAR;
 static int g_input_panel = INPUT_PANEL_GAMEPAD;
+static int g_lcd_theme = GAM4980_LCD_THEME_OFF;
+static int g_lcd_ghosting;
+static int g_ghost_frame_valid;
+static int g_ghost_fade_pending;
+static int g_keyboard_page = KEYBOARD_PAGE_ALPHA;
+static const touch_button_t *g_touch_button;
+static u32 g_touch_hold_ticks;
+static int g_touch_key_active;
+static int g_touch_had_key;
 static int g_settings_open;
 static int g_settings_selection;
 static int g_settings_key_release_ticks;
+static int g_session_action;
 static u32 g_frame_queue_read;
 static u32 g_frame_queue_write;
 static u32 g_frame_queue_count;
 static u32 g_frame_queue_drops;
 static u32 g_frame_present_hold_ticks;
+static s16 g_pcm[PCM_SAMPLE_COUNT];
+static u32 g_audio_blocks_written;
+static u32 g_audio_write_errors;
+static u32 g_audio_padded_samples;
+static int g_audio_open;
 
 static void copy_text(char *out, const char *text, u32 capacity)
 {
@@ -279,6 +358,85 @@ static void reset_log(void)
         (void)bda_fs_close_raw(file);
 }
 
+static void audio_stream_stop(void)
+{
+    if (!g_audio_open)
+        return;
+    log_hex_value("AUDIO BLOCKS=", g_audio_blocks_written);
+    log_hex_value("AUDIO ERRORS=", g_audio_write_errors);
+    log_hex_value("AUDIO PADDED=", g_audio_padded_samples);
+    log_hex_value("AUDIO DROPS=", gam4980_audio_dropped());
+    bda_audio_stop();
+    g_audio_open = 0;
+    log_line("AUDIO STOP");
+}
+
+static void audio_stream_start(void)
+{
+    u32 block;
+
+    g_audio_blocks_written = 0;
+    g_audio_write_errors = 0;
+    g_audio_padded_samples = 0;
+    bda_audio_open_pcm(
+        BDA_AUDIO_SAMPLE_RATE_22050,
+        BDA_AUDIO_BITS_16,
+        BDA_AUDIO_CHANNELS_MONO
+    );
+    g_audio_open = 1;
+    log_line("AUDIO START");
+
+    bda_memset(g_pcm, 0, PCM_BYTE_COUNT);
+    for (block = 0; block < PCM_PREFILL_BLOCK_COUNT; ++block) {
+        int written;
+
+        if (!bda_audio_ready())
+            break;
+        written = bda_audio_write(g_pcm, PCM_BYTE_COUNT);
+        if (written != (int)PCM_BYTE_COUNT) {
+            ++g_audio_write_errors;
+            log_line("AUDIO PREFILL FAILED");
+            audio_stream_stop();
+            return;
+        }
+        ++g_audio_blocks_written;
+    }
+}
+
+static void audio_stream_pump(void)
+{
+    u32 blocks = 0;
+
+    while (g_audio_open && blocks < PCM_PUMP_BLOCK_LIMIT &&
+           bda_audio_ready()) {
+        u32 sample_count = gam4980_audio_available();
+        int written;
+
+        if (sample_count > PCM_SAMPLE_COUNT)
+            sample_count = PCM_SAMPLE_COUNT;
+        if (sample_count < PCM_SAMPLE_COUNT) {
+            bda_memset(g_pcm, 0, PCM_BYTE_COUNT);
+            g_audio_padded_samples += PCM_SAMPLE_COUNT - sample_count;
+        }
+        if (sample_count &&
+            gam4980_audio_read(g_pcm, sample_count) != sample_count) {
+            ++g_audio_write_errors;
+            log_line("AUDIO CORE READ FAILED");
+            audio_stream_stop();
+            return;
+        }
+        written = bda_audio_write(g_pcm, PCM_BYTE_COUNT);
+        if (written != (int)PCM_BYTE_COUNT) {
+            ++g_audio_write_errors;
+            log_line("AUDIO WRITE FAILED");
+            audio_stream_stop();
+            return;
+        }
+        ++g_audio_blocks_written;
+        ++blocks;
+    }
+}
+
 static int valid_pointer(const void *pointer)
 {
     return pointer && (s32)(u32)pointer != -1;
@@ -301,6 +459,8 @@ static void init_bilinear_axis(
 static void release_buffers(void)
 {
     gam4980_deinit();
+    if (valid_pointer(g_ghost_framebuffer))
+        bda_free(g_ghost_framebuffer);
     if (valid_pointer(g_screen_pixels))
         bda_free(g_screen_pixels);
     if (valid_pointer(g_scaled_framebuffer))
@@ -318,6 +478,7 @@ static void release_buffers(void)
     if (valid_pointer(g_buffers.rom_e))
         bda_free(g_buffers.rom_e);
     bda_memset(&g_buffers, 0, sizeof(g_buffers));
+    g_ghost_framebuffer = 0;
     g_scaled_framebuffer = 0;
     g_screen_pixels = 0;
     g_frame_queue = 0;
@@ -326,6 +487,7 @@ static void release_buffers(void)
 static int allocate_buffers(void)
 {
     bda_memset(&g_buffers, 0, sizeof(g_buffers));
+    g_ghost_framebuffer = 0;
     g_scaled_framebuffer = 0;
     g_screen_pixels = 0;
     g_frame_queue = 0;
@@ -335,12 +497,14 @@ static int allocate_buffers(void)
     g_buffers.rom_8 = (u8 *)bda_alloc(GAM4980_ROM_SIZE);
     g_buffers.rom_e = (u8 *)bda_alloc(GAM4980_ROM_SIZE);
     g_buffers.framebuffer = (u16 *)bda_alloc(CORE_FRAME_BYTES);
+    g_ghost_framebuffer = (u16 *)bda_alloc(CORE_FRAME_BYTES);
     g_scaled_framebuffer = (u16 *)bda_alloc(VIEW_FRAME_BYTES);
     g_screen_pixels = (u16 *)bda_alloc(SCREEN_FRAME_BYTES);
     g_frame_queue = (u8 *)bda_alloc(FRAME_QUEUE_BYTES);
     if (!valid_pointer(g_buffers.ram) || !valid_pointer(g_buffers.flash) ||
         !valid_pointer(g_buffers.rom_8) || !valid_pointer(g_buffers.rom_e) ||
         !valid_pointer(g_buffers.framebuffer) ||
+        !valid_pointer(g_ghost_framebuffer) ||
         !valid_pointer(g_scaled_framebuffer) ||
         !valid_pointer(g_screen_pixels) ||
         !valid_pointer(g_frame_queue)) {
@@ -447,30 +611,42 @@ static int write_exact(int file, const u8 *data, u32 size)
     return 1;
 }
 
-static void load_scaling_config(void)
+static void load_ui_config(void)
 {
     u8 data[8];
     int file;
 
     g_scale_algorithm = SCALE_BILINEAR;
+    g_input_panel = INPUT_PANEL_GAMEPAD;
+    g_lcd_theme = GAM4980_LCD_THEME_OFF;
+    g_lcd_ghosting = 0;
     file = bda_fs_fopen_raw(k_config_path, "rb");
     if (!bda_fs_file_is_valid(file))
         return;
     if (read_exact(file, data, sizeof(data)) &&
         data[0] == 'G' && data[1] == '4' &&
-        data[2] == 'S' && data[3] == '1' &&
-        data[4] < SCALE_ALGORITHM_COUNT) {
-        g_scale_algorithm = data[4];
+        data[2] == 'S' && data[3] == '1') {
+        if (data[4] < SCALE_ALGORITHM_COUNT)
+            g_scale_algorithm = data[4];
+        if (data[5] <= INPUT_PANEL_KEYBOARD)
+            g_input_panel = data[5];
+        if (data[6] < GAM4980_LCD_THEME_COUNT)
+            g_lcd_theme = data[6];
+        if (data[7] <= 1u)
+            g_lcd_ghosting = data[7];
     }
     (void)bda_fs_close_raw(file);
 }
 
-static void write_scaling_config(void)
+static void write_ui_config(void)
 {
     u8 data[8] = { 'G', '4', 'S', '1', 0, 0, 0, 0 };
     int file;
 
     data[4] = (u8)g_scale_algorithm;
+    data[5] = (u8)g_input_panel;
+    data[6] = (u8)g_lcd_theme;
+    data[7] = (u8)g_lcd_ghosting;
     file = bda_fs_fopen_raw(k_config_path, "wb");
     if (!bda_fs_file_is_valid(file)) {
         log_line("CONFIG OPEN FAILED");
@@ -693,6 +869,11 @@ static void draw_button(const touch_button_t *button)
     u16 text = rgb565(238, 244, 239);
     int scale = button->width >= 70 ? 2 : 1;
 
+    if (g_touch_key_active && g_touch_button == button) {
+        border = rgb565(238, 177, 45);
+        fill = rgb565(35, 91, 91);
+    }
+
     fill_rect(button->x, button->y, button->width, button->height, border);
     fill_rect(button->x + 2, button->y + 2,
               button->width - 4, button->height - 4, fill);
@@ -769,6 +950,28 @@ static void draw_radio(int center_x, int center_y, int selected)
         fill_rect(center_x - 2, center_y - 2, 5, 5, accent);
 }
 
+static void draw_lcd_swatch(int x, int y)
+{
+    u16 outline = rgb565(146, 164, 170);
+
+    fill_rect(x, y, 22, 14, outline);
+    fill_rect(x + 2, y + 2, 18, 10,
+              gam4980_lcd_background_color());
+    fill_rect(x + 5, y + 5, 12, 4,
+              gam4980_lcd_foreground_color());
+}
+
+static void draw_toggle(int x, int y, int enabled)
+{
+    u16 outline = rgb565(146, 164, 170);
+    u16 track = enabled ? rgb565(41, 178, 178) : rgb565(35, 51, 58);
+    u16 knob = rgb565(238, 244, 239);
+
+    fill_rect(x, y, 34, 16, outline);
+    fill_rect(x + 2, y + 2, 30, 12, track);
+    fill_rect(enabled ? x + 19 : x + 3, y + 3, 12, 10, knob);
+}
+
 static void draw_settings_row(void)
 {
     u16 border = rgb565(55, 76, 84);
@@ -778,6 +981,28 @@ static void draw_settings_row(void)
 
     fill_rect(8, SETTINGS_ROW_Y, 224, SETTINGS_ROW_HEIGHT, border);
     fill_rect(10, SETTINGS_ROW_Y + 2, 220, SETTINGS_ROW_HEIGHT - 4, fill);
+
+    if (g_input_panel == INPUT_PANEL_KEYBOARD) {
+        const char *page_label = g_keyboard_page == KEYBOARD_PAGE_ALPHA ?
+            "FN" : "ABC";
+        int page_width = label_width(page_label, 1);
+
+        fill_rect(
+            k_keyboard_page_button.x, k_keyboard_page_button.y,
+            k_keyboard_page_button.width, k_keyboard_page_button.height,
+            accent
+        );
+        fill_rect(
+            k_keyboard_page_button.x + 2, k_keyboard_page_button.y + 2,
+            k_keyboard_page_button.width - 4,
+            k_keyboard_page_button.height - 4, fill
+        );
+        draw_text(
+            k_keyboard_page_button.x +
+                (k_keyboard_page_button.width - page_width) / 2,
+            k_keyboard_page_button.y + 8, page_label, 1, text
+        );
+    }
 
     fill_rect(
         k_input_panel_button.x, k_input_panel_button.y,
@@ -818,20 +1043,20 @@ static void draw_settings_row(void)
 
 static void draw_settings_overlay(void)
 {
-    const ui_rect_t panel = { 14, 64, 212, 180 };
+    const ui_rect_t panel = { 14, 18, 212, 284 };
     u16 panel_border = rgb565(238, 177, 45);
     u16 panel_fill = rgb565(14, 25, 32);
     u16 row_fill = rgb565(22, 34, 42);
     u16 row_border = rgb565(55, 76, 84);
     u16 focus = rgb565(41, 178, 178);
     u16 text = rgb565(238, 244, 239);
-    int title_width = label_width("SCALING", 2);
+    int title_width = label_width("SETTINGS", 2);
     int index;
 
     fill_rect(panel.x, panel.y, panel.width, panel.height, panel_border);
     fill_rect(panel.x + 2, panel.y + 2, panel.width - 4, panel.height - 4,
               panel_fill);
-    draw_text((SCREEN_WIDTH - title_width) / 2, 75, "SCALING", 2, text);
+    draw_text((SCREEN_WIDTH - title_width) / 2, 29, "SETTINGS", 2, text);
 
     fill_rect(
         k_settings_close.x, k_settings_close.y,
@@ -855,6 +1080,51 @@ static void draw_settings_overlay(void)
         draw_text(row->x + 38, row->y + (row->height - 14) / 2,
                   k_algorithm_names[index], 2, text);
     }
+
+    {
+        const ui_rect_t *row = &k_settings_options[SETTINGS_ITEM_LCD_THEME];
+        const char *name = k_lcd_theme_names[g_lcd_theme];
+        int width = label_width(name, 2);
+        u16 border = SETTINGS_ITEM_LCD_THEME == g_settings_selection ?
+                     focus : row_border;
+
+        fill_rect(row->x, row->y, row->width, row->height, border);
+        fill_rect(row->x + 2, row->y + 2, row->width - 4, row->height - 4,
+                  row_fill);
+        draw_lcd_swatch(row->x + 10, row->y + 7);
+        draw_text(row->x + 40, row->y + 7, "COLOR", 2, text);
+        draw_text(row->x + row->width - width - 10, row->y + 7,
+                  name, 2, text);
+    }
+
+    {
+        const ui_rect_t *row =
+            &k_settings_options[SETTINGS_ITEM_LCD_GHOSTING];
+        u16 border = SETTINGS_ITEM_LCD_GHOSTING == g_settings_selection ?
+                     focus : row_border;
+
+        fill_rect(row->x, row->y, row->width, row->height, border);
+        fill_rect(row->x + 2, row->y + 2, row->width - 4, row->height - 4,
+                  row_fill);
+        draw_text(row->x + 12, row->y + 7, "GHOST", 2, text);
+        draw_toggle(row->x + row->width - 46, row->y + 6,
+                    g_lcd_ghosting);
+    }
+
+    for (index = SETTINGS_ITEM_RESTART;
+         index < SETTINGS_ITEM_COUNT; ++index) {
+        const ui_rect_t *row = &k_settings_options[index];
+        const char *label =
+            k_settings_command_names[index - SETTINGS_ITEM_RESTART];
+        int width = label_width(label, 2);
+        u16 border = index == g_settings_selection ? focus : row_border;
+
+        fill_rect(row->x, row->y, row->width, row->height, border);
+        fill_rect(row->x + 2, row->y + 2, row->width - 4, row->height - 4,
+                  row_fill);
+        draw_text(row->x + (row->width - width) / 2,
+                  row->y + (row->height - 14) / 2, label, 2, text);
+    }
 }
 
 static u16 lerp_rgb565(u16 first, u16 second, u32 weight)
@@ -872,6 +1142,67 @@ static u16 lerp_rgb565(u16 first, u16 second, u32 weight)
               ((second >> 5) & 63u) * weight + 128u) >> 8);
     blue = (((first & 31u) * inverse + (second & 31u) * weight + 128u) >> 8);
     return (u16)((red << 11) | (green << 5) | blue);
+}
+
+static int rgb565_close(u16 first, u16 second)
+{
+    u32 first_red = first >> 11;
+    u32 second_red = second >> 11;
+    u32 first_green = (first >> 5) & 63u;
+    u32 second_green = (second >> 5) & 63u;
+    u32 first_blue = first & 31u;
+    u32 second_blue = second & 31u;
+    u32 red_delta = first_red > second_red ?
+                    first_red - second_red : second_red - first_red;
+    u32 green_delta = first_green > second_green ?
+                      first_green - second_green : second_green - first_green;
+    u32 blue_delta = first_blue > second_blue ?
+                     first_blue - second_blue : second_blue - first_blue;
+
+    return red_delta <= 1u && green_delta <= 3u && blue_delta <= 1u;
+}
+
+static void reset_ghost_frame(void)
+{
+    g_ghost_frame_valid = 0;
+    g_ghost_fade_pending = 0;
+}
+
+static const u16 *prepare_lcd_source(const u16 *source, int advance_ghost)
+{
+    const u32 pixel_count = LCD_SOURCE_WIDTH * GAM4980_LCD_HEIGHT;
+    u16 background;
+    u32 index;
+    int pending = 0;
+
+    if (!g_lcd_ghosting || !g_ghost_framebuffer)
+        return source;
+    if (!g_ghost_frame_valid) {
+        bda_memcpy(g_ghost_framebuffer, source, CORE_FRAME_BYTES);
+        g_ghost_frame_valid = 1;
+        g_ghost_fade_pending = 0;
+        return g_ghost_framebuffer;
+    }
+    if (!advance_ghost)
+        return g_ghost_framebuffer;
+
+    background = gam4980_lcd_background_color();
+    for (index = 0; index < pixel_count; ++index) {
+        u16 target = source[index];
+        u16 current = g_ghost_framebuffer[index];
+        u16 next = target;
+
+        if (target == background && current != target) {
+            next = lerp_rgb565(current, target, 176u);
+            if (rgb565_close(next, target))
+                next = target;
+        }
+        g_ghost_framebuffer[index] = next;
+        if (next != target)
+            pending = 1;
+    }
+    g_ghost_fade_pending = pending;
+    return g_ghost_framebuffer;
 }
 
 static void bilinear_scale_to_view(
@@ -964,6 +1295,27 @@ static void copy_lcd_to_full_screen(void)
     }
 }
 
+static void current_touch_buttons(
+    const touch_button_t **buttons,
+    u32 *button_count
+) {
+    if (g_input_panel == INPUT_PANEL_KEYBOARD) {
+        if (g_keyboard_page == KEYBOARD_PAGE_FUNCTION) {
+            *buttons = k_function_keyboard_buttons;
+            *button_count = sizeof(k_function_keyboard_buttons) /
+                sizeof(k_function_keyboard_buttons[0]);
+        } else {
+            *buttons = k_alpha_keyboard_buttons;
+            *button_count = sizeof(k_alpha_keyboard_buttons) /
+                sizeof(k_alpha_keyboard_buttons[0]);
+        }
+    } else {
+        *buttons = k_gamepad_buttons;
+        *button_count = sizeof(k_gamepad_buttons) /
+            sizeof(k_gamepad_buttons[0]);
+    }
+}
+
 static void render_game_screen(const u16 *source)
 {
     u16 background = rgb565(10, 20, 27);
@@ -979,15 +1331,7 @@ static void render_game_screen(const u16 *source)
     scale_lcd_to_view(source);
     copy_lcd_to_full_screen();
     draw_settings_row();
-    if (g_input_panel == INPUT_PANEL_KEYBOARD) {
-        buttons = k_keyboard_buttons;
-        button_count = sizeof(k_keyboard_buttons) /
-            sizeof(k_keyboard_buttons[0]);
-    } else {
-        buttons = k_gamepad_buttons;
-        button_count = sizeof(k_gamepad_buttons) /
-            sizeof(k_gamepad_buttons[0]);
-    }
+    current_touch_buttons(&buttons, &button_count);
     for (index = 0; index < button_count; ++index)
         draw_button(&buttons[index]);
     if (g_settings_open)
@@ -1021,7 +1365,7 @@ static int acquire_draw_context(bda_handle_t owner)
     return 1;
 }
 
-static int present_screen(const u8 *packed_frame)
+static int present_screen(const u8 *packed_frame, int advance_ghost)
 {
     const u16 *source = gam4980_expand_frame(packed_frame);
     int draw_result;
@@ -1034,6 +1378,7 @@ static int present_screen(const u8 *packed_frame)
 
     if (!source || !g_draw || !g_draw_object)
         return 0;
+    source = prepare_lcd_source(source, advance_ghost);
     if (g_full_redraw) {
         render_game_screen(source);
         g_full_picture.source_pixels = g_screen_pixels;
@@ -1083,8 +1428,46 @@ static void sync_previous_keys(void)
     g_previous_keys = packet_mask(&packet);
 }
 
+static void release_touch_key(void)
+{
+    if (g_touch_key_active)
+        g_full_redraw = 1;
+    g_touch_button = 0;
+    g_touch_hold_ticks = 0;
+    g_touch_key_active = 0;
+}
+
+static const touch_button_t *find_touch_button(int x, int y)
+{
+    const touch_button_t *buttons;
+    u32 button_count;
+    u32 index;
+
+    current_touch_buttons(&buttons, &button_count);
+    for (index = 0; index < button_count; ++index) {
+        if (point_in_button(x, y, &buttons[index]))
+            return &buttons[index];
+    }
+    return 0;
+}
+
+static void press_touch_button(const touch_button_t *button)
+{
+    if (g_touch_key_active && g_touch_button == button)
+        return;
+    release_touch_key();
+    clear_frame_queue();
+    gam4980_key_down(button->key);
+    g_touch_button = button;
+    g_touch_hold_ticks = 0;
+    g_touch_key_active = 1;
+    g_touch_had_key = 1;
+    g_full_redraw = 1;
+}
+
 static void open_settings(void)
 {
+    release_touch_key();
     sync_previous_keys();
     clear_frame_queue();
     g_settings_selection = g_scale_algorithm;
@@ -1102,85 +1485,179 @@ static void close_settings(void)
     g_full_redraw = 1;
 }
 
-static void apply_scaling_selection(void)
+static void request_session_action(int action)
+{
+    release_touch_key();
+    sync_previous_keys();
+    clear_frame_queue();
+    g_settings_key_release_ticks = 0;
+    g_settings_open = 0;
+    g_session_action = action;
+    g_close_requested = 1;
+    log_line(action == SESSION_ACTION_RESTART ?
+             "RESTART REQUESTED" : "CHANGE GAME REQUESTED");
+}
+
+static void cycle_lcd_theme(void)
+{
+    ++g_lcd_theme;
+    if (g_lcd_theme >= GAM4980_LCD_THEME_COUNT)
+        g_lcd_theme = GAM4980_LCD_THEME_OFF;
+    gam4980_set_lcd_theme((u32)g_lcd_theme);
+    clear_frame_queue();
+    reset_ghost_frame();
+    write_ui_config();
+    log_line("LCD COLOR CHANGED");
+    log_line(k_lcd_theme_names[g_lcd_theme]);
+    g_full_redraw = 1;
+}
+
+static void toggle_lcd_ghosting(void)
+{
+    g_lcd_ghosting = !g_lcd_ghosting;
+    clear_frame_queue();
+    reset_ghost_frame();
+    write_ui_config();
+    log_line(g_lcd_ghosting ? "LCD GHOSTING ON" : "LCD GHOSTING OFF");
+    g_full_redraw = 1;
+}
+
+static void apply_settings_selection(void)
 {
     if (g_settings_selection >= 0 &&
         g_settings_selection < SCALE_ALGORITHM_COUNT &&
         g_scale_algorithm != g_settings_selection) {
         g_scale_algorithm = g_settings_selection;
-        write_scaling_config();
+        write_ui_config();
         log_line("SCALING CHANGED");
         log_line(k_algorithm_names[g_scale_algorithm]);
     }
-    close_settings();
+    if (g_settings_selection < SCALE_ALGORITHM_COUNT) {
+        close_settings();
+    } else if (g_settings_selection == SETTINGS_ITEM_LCD_THEME) {
+        cycle_lcd_theme();
+    } else if (g_settings_selection == SETTINGS_ITEM_LCD_GHOSTING) {
+        toggle_lcd_ghosting();
+    } else if (g_settings_selection == SETTINGS_ITEM_RESTART) {
+        request_session_action(SESSION_ACTION_RESTART);
+    } else if (g_settings_selection == SETTINGS_ITEM_CHANGE_GAME) {
+        request_session_action(SESSION_ACTION_CHANGE_GAME);
+    }
 }
 
 static void toggle_input_panel(void)
 {
+    release_touch_key();
     g_input_panel = g_input_panel == INPUT_PANEL_GAMEPAD ?
         INPUT_PANEL_KEYBOARD : INPUT_PANEL_GAMEPAD;
+    clear_frame_queue();
+    write_ui_config();
+    g_full_redraw = 1;
+}
+
+static void toggle_keyboard_page(void)
+{
+    release_touch_key();
+    g_keyboard_page = g_keyboard_page == KEYBOARD_PAGE_ALPHA ?
+        KEYBOARD_PAGE_FUNCTION : KEYBOARD_PAGE_ALPHA;
     clear_frame_queue();
     g_full_redraw = 1;
 }
 
-static void queue_touch(u32 packed)
+static void queue_touch(u32 message, u32 packed)
 {
     u32 next = (g_touch_write + 1u) % TOUCH_QUEUE_SIZE;
-    if (next == g_touch_read)
-        return;
-    g_touch_queue[g_touch_write] = packed;
+    if (next == g_touch_read) {
+        if (message != BDA_MSG_TOUCH_RELEASE)
+            return;
+        g_touch_read = (g_touch_read + 1u) % TOUCH_QUEUE_SIZE;
+    }
+    g_touch_queue[g_touch_write].message = message;
+    g_touch_queue[g_touch_write].packed = packed;
     g_touch_write = next;
+}
+
+static void handle_touch_release(int x, int y)
+{
+    const touch_button_t *button;
+    u32 index;
+
+    if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT)
+        return;
+    if (g_settings_open) {
+        if (point_in_rect(x, y, &k_settings_close)) {
+            close_settings();
+            return;
+        }
+        for (index = 0; index < SETTINGS_ITEM_COUNT; ++index) {
+            if (point_in_rect(x, y, &k_settings_options[index])) {
+                g_settings_selection = (int)index;
+                apply_settings_selection();
+                return;
+            }
+        }
+        return;
+    }
+    if (g_input_panel == INPUT_PANEL_KEYBOARD &&
+        point_in_rect(x, y, &k_keyboard_page_button)) {
+        toggle_keyboard_page();
+        return;
+    }
+    if (point_in_rect(x, y, &k_input_panel_button)) {
+        toggle_input_panel();
+        return;
+    }
+    if (point_in_rect(x, y, &k_settings_button)) {
+        open_settings();
+        return;
+    }
+    button = find_touch_button(x, y);
+    if (button) {
+        clear_frame_queue();
+        gam4980_key_down(button->key);
+    }
 }
 
 static void drain_touches(void)
 {
     while (g_touch_read != g_touch_write) {
-        u32 packed = g_touch_queue[g_touch_read];
-        int x = (s32)(short)(packed & 0xffffu);
-        int y = (s32)(short)(packed >> 16);
-        const touch_button_t *buttons;
-        u32 button_count;
-        u32 index;
+        touch_event_t event = g_touch_queue[g_touch_read];
+        int x = (s32)(short)(event.packed & 0xffffu);
+        int y = (s32)(short)(event.packed >> 16);
 
         g_touch_read = (g_touch_read + 1u) % TOUCH_QUEUE_SIZE;
-        if (g_settings_open) {
-            if (point_in_rect(x, y, &k_settings_close)) {
-                close_settings();
-                continue;
-            }
-            for (index = 0; index < SCALE_ALGORITHM_COUNT; ++index) {
-                if (point_in_rect(x, y, &k_settings_options[index])) {
-                    g_settings_selection = (int)index;
-                    apply_scaling_selection();
-                    break;
-                }
-            }
-            continue;
+        if (event.message == BDA_MSG_TOUCH_COORDINATE) {
+            const touch_button_t *button = 0;
+            if (!g_settings_open && x >= 0 && x < SCREEN_WIDTH &&
+                y >= 0 && y < SCREEN_HEIGHT)
+                button = find_touch_button(x, y);
+            if (button)
+                press_touch_button(button);
+            else
+                release_touch_key();
+        } else if (event.message == BDA_MSG_TOUCH_RELEASE) {
+            int had_key = g_touch_had_key;
+            release_touch_key();
+            g_touch_had_key = 0;
+            if (!had_key)
+                handle_touch_release(x, y);
         }
-        if (point_in_rect(x, y, &k_input_panel_button)) {
-            toggle_input_panel();
-            continue;
-        }
-        if (point_in_rect(x, y, &k_settings_button)) {
-            open_settings();
-            continue;
-        }
-        if (g_input_panel == INPUT_PANEL_KEYBOARD) {
-            buttons = k_keyboard_buttons;
-            button_count = sizeof(k_keyboard_buttons) /
-                sizeof(k_keyboard_buttons[0]);
-        } else {
-            buttons = k_gamepad_buttons;
-            button_count = sizeof(k_gamepad_buttons) /
-                sizeof(k_gamepad_buttons[0]);
-        }
-        for (index = 0; index < button_count; ++index) {
-            if (point_in_button(x, y, &buttons[index])) {
-                clear_frame_queue();
-                gam4980_key_down(buttons[index].key);
-                break;
-            }
-        }
+    }
+}
+
+static void poll_touch_repeat(u32 elapsed_ticks)
+{
+    if (!g_touch_key_active || !g_touch_button ||
+        !g_touch_button->repeat)
+        return;
+    g_touch_hold_ticks += elapsed_ticks;
+    if (g_touch_hold_ticks >= TOUCH_REPEAT_DELAY_TICKS) {
+        clear_frame_queue();
+        gam4980_key_down(g_touch_button->key);
+        g_touch_hold_ticks = TOUCH_REPEAT_DELAY_TICKS -
+            TOUCH_REPEAT_INTERVAL_TICKS +
+            ((g_touch_hold_ticks - TOUCH_REPEAT_DELAY_TICKS) %
+             TOUCH_REPEAT_INTERVAL_TICKS);
     }
 }
 
@@ -1273,15 +1750,15 @@ static void poll_settings_keys(void)
     pressed = current & ~g_previous_keys;
 
     if (pressed & (1u << 5)) {
-        apply_scaling_selection();
+        apply_settings_selection();
     } else if (pressed & ((1u << 1) | (1u << 3))) {
         --g_settings_selection;
         if (g_settings_selection < 0)
-            g_settings_selection = SCALE_ALGORITHM_COUNT - 1;
+            g_settings_selection = SETTINGS_ITEM_COUNT - 1;
         g_full_redraw = 1;
     } else if (pressed & ((1u << 0) | (1u << 2))) {
         ++g_settings_selection;
-        if (g_settings_selection >= SCALE_ALGORITHM_COUNT)
+        if (g_settings_selection >= SETTINGS_ITEM_COUNT)
             g_settings_selection = 0;
         g_full_redraw = 1;
     }
@@ -1304,12 +1781,11 @@ static int gam_window_proc(bda_handle_t handle, u32 message, u32 wparam, u32 lpa
             release_draw_context();
         g_detached = 1;
     }
-    if (message == BDA_MSG_TOUCH_RELEASE) {
-        queue_touch(lparam);
+    if (message == BDA_MSG_TOUCH_COORDINATE ||
+        message == BDA_MSG_TOUCH_RELEASE) {
+        queue_touch(message, lparam);
         return 1;
     }
-    if (message == BDA_MSG_TOUCH_COORDINATE)
-        return 1;
     return bda_gui_default_proc(handle, message, wparam, lparam);
 }
 
@@ -1333,6 +1809,10 @@ static int run_window(void)
     g_draw_object = 0;
     g_touch_read = 0;
     g_touch_write = 0;
+    g_touch_button = 0;
+    g_touch_hold_ticks = 0;
+    g_touch_key_active = 0;
+    g_touch_had_key = 0;
     g_detached = 0;
     g_previous_keys = 0;
     g_full_redraw = 1;
@@ -1341,11 +1821,13 @@ static int run_window(void)
     g_frame_count = 0;
     g_core_frame_phase = 0;
     g_core_break_logged = 0;
-    g_input_panel = INPUT_PANEL_GAMEPAD;
+    g_keyboard_page = KEYBOARD_PAGE_ALPHA;
     g_settings_open = 0;
     g_settings_selection = g_scale_algorithm;
     g_settings_key_release_ticks = 0;
+    g_session_action = SESSION_ACTION_EXIT;
     clear_frame_queue();
+    reset_ghost_frame();
     g_frame_queue_drops = 0;
 
     descriptor.style = 0;
@@ -1366,6 +1848,7 @@ static int run_window(void)
     (void)bda_gui_input_packet(&initial_packet);
     g_previous_keys = packet_mask(&initial_packet);
     log_line("WINDOW START");
+    audio_stream_start();
     window_ok = 1;
     for (;;) {
         int pump_result = bda_gui_event_pump_frame_once(&message, g_frame);
@@ -1381,11 +1864,12 @@ static int run_window(void)
                 poll_settings_keys();
                 g_core_frame_phase = 0;
                 if (g_full_redraw &&
-                    !present_screen(gam4980_packed_frame()))
+                    !present_screen(gam4980_packed_frame(), 0))
                     log_line("PRESENT FAILED");
             } else {
                 const u8 *queued_frame;
 
+                poll_touch_repeat(elapsed_ticks);
                 poll_game_keys(now);
                 if (elapsed_ticks >= g_frame_present_hold_ticks)
                     g_frame_present_hold_ticks = 0;
@@ -1401,7 +1885,7 @@ static int run_window(void)
                 g_frame_count += elapsed_ticks;
                 queued_frame = peek_frame_queue();
                 if (queued_frame && !g_frame_present_hold_ticks) {
-                    if (present_screen(queued_frame)) {
+                    if (present_screen(queued_frame, 1)) {
                         pop_frame_queue();
                         g_frame_present_hold_ticks =
                             FRAME_PRESENT_HOLD_TICKS;
@@ -1409,11 +1893,20 @@ static int run_window(void)
                         log_line("PRESENT FAILED");
                     }
                 } else if (!queued_frame && g_full_redraw &&
-                           !present_screen(gam4980_packed_frame())) {
+                           !present_screen(gam4980_packed_frame(), 0)) {
                     log_line("PRESENT FAILED");
+                } else if (!queued_frame && !g_frame_present_hold_ticks &&
+                           g_lcd_ghosting && g_ghost_fade_pending) {
+                    if (present_screen(gam4980_packed_frame(), 1)) {
+                        g_frame_present_hold_ticks =
+                            FRAME_PRESENT_HOLD_TICKS;
+                    } else {
+                        log_line("PRESENT FAILED");
+                    }
                 }
             }
         }
+        audio_stream_pump();
         if (!g_close_requested &&
             bda_gui_tick_elapsed_25ms(last_save_tick, now) >= SAVE_INTERVAL_TICKS) {
             write_save();
@@ -1426,6 +1919,7 @@ static int run_window(void)
             g_core_break_logged = 1;
         }
         if (g_close_requested && close_wait == 0) {
+            audio_stream_stop();
             write_save();
             (void)bda_gui_frame_stop(g_frame);
             (void)bda_gui_frame_release(g_frame);
@@ -1440,6 +1934,7 @@ static int run_window(void)
     log_line("WINDOW END");
 
 cleanup:
+    audio_stream_stop();
     release_draw_context();
     if (g_frame) {
         bda_gui_close_frame(g_frame);
@@ -1453,62 +1948,121 @@ int bda_main(void)
 {
     int result = 0;
     int selector_result;
+    int select_game = 1;
 
     (void)bda_fs_mkdir(k_data_dir);
     (void)bda_fs_mkdir(k_game_dir);
     reset_log();
-    load_scaling_config();
+    load_ui_config();
     log_line("START STANDALONE");
-    g_save_path[0] = 0;
-    g_loaded_game_size = 0;
-    selector_result = bda_gui_select_file(
-        &g_file_selector, k_game_selector_path, "gam", "Select GAM"
-    );
-    if (selector_result == BDA_FILE_SELECTOR_CANCELLED) {
-        log_line("GAME SELECTION CANCELLED");
-        goto cleanup;
-    }
-    if (selector_result != BDA_FILE_SELECTOR_SELECTED) {
-        bda_msgbox(k_window_title, "Could not open the .gam file selector.");
-        result = -1;
-        goto cleanup;
-    }
-    log_line("GAME SELECTED");
-    log_line(g_file_selector.path);
-    if (!allocate_buffers()) {
-        bda_msgbox(k_window_title, "Not enough memory (requires about 6.3 MiB).");
-        result = -2;
-        goto cleanup;
-    }
-    if (!load_fixed_file(k_rom_8_path, g_buffers.rom_8, GAM4980_ROM_SIZE)) {
-        bda_msgbox(k_window_title, "Missing or invalid 8.BIN in application data.");
-        result = -3;
-        goto cleanup;
-    }
-    if (!load_fixed_file(k_rom_e_path, g_buffers.rom_e, GAM4980_ROM_SIZE)) {
-        bda_msgbox(k_window_title, "Missing or invalid E.BIN in application data.");
-        result = -4;
-        goto cleanup;
-    }
-    if (gam4980_init(&g_buffers) <= 0) {
-        bda_msgbox(k_window_title, "Firmware initialization failed.");
-        result = -5;
-        goto cleanup;
-    }
-    if (load_game(g_file_selector.path) <= 0) {
-        bda_msgbox(k_window_title, "The selected .gam file is invalid or unreadable.");
-        result = -6;
-        goto cleanup;
-    }
-    log_hex_value("GAME SIZE=", g_loaded_game_size);
-    if (!run_window()) {
-        bda_msgbox(k_window_title, "Could not create the emulator window.");
-        result = -7;
+    g_file_selector.path[0] = 0;
+    for (;;) {
+        if (select_game) {
+            char previous_game_path[BDA_FILE_SELECTOR_PATH_SIZE];
+            int had_previous_game = g_file_selector.path[0] != 0;
+
+            copy_text(previous_game_path, g_file_selector.path,
+                      sizeof(previous_game_path));
+            selector_result = bda_gui_select_file(
+                &g_file_selector, k_game_selector_path, "gam", "Select GAM"
+            );
+            if (selector_result == BDA_FILE_SELECTOR_SELECTED) {
+                log_line("GAME SELECTED");
+                log_line(g_file_selector.path);
+            } else if (had_previous_game) {
+                copy_text(g_file_selector.path, previous_game_path,
+                          sizeof(g_file_selector.path));
+                if (selector_result == BDA_FILE_SELECTOR_CANCELLED) {
+                    log_line("GAME CHANGE CANCELLED");
+                } else {
+                    log_line("GAME SELECTOR ERROR");
+                    bda_msgbox(
+                        k_window_title,
+                        "Could not open the .gam file selector. The current game will restart."
+                    );
+                }
+            } else {
+                if (selector_result == BDA_FILE_SELECTOR_CANCELLED) {
+                    log_line("GAME SELECTION CANCELLED");
+                } else {
+                    bda_msgbox(
+                        k_window_title,
+                        "Could not open the .gam file selector."
+                    );
+                    result = -1;
+                }
+                goto cleanup;
+            }
+        }
+        select_game = 0;
+        g_save_path[0] = 0;
+        g_loaded_game_size = 0;
+        if (!allocate_buffers()) {
+            bda_msgbox(
+                k_window_title,
+                "Not enough memory (requires about 6.4 MiB)."
+            );
+            result = -2;
+            goto cleanup;
+        }
+        if (!load_fixed_file(
+                k_rom_8_path, g_buffers.rom_8, GAM4980_ROM_SIZE)) {
+            bda_msgbox(
+                k_window_title,
+                "Missing or invalid 8.BIN in application data."
+            );
+            result = -3;
+            goto cleanup;
+        }
+        if (!load_fixed_file(
+                k_rom_e_path, g_buffers.rom_e, GAM4980_ROM_SIZE)) {
+            bda_msgbox(
+                k_window_title,
+                "Missing or invalid E.BIN in application data."
+            );
+            result = -4;
+            goto cleanup;
+        }
+        if (gam4980_init(&g_buffers) <= 0) {
+            bda_msgbox(k_window_title, "Firmware initialization failed.");
+            result = -5;
+            goto cleanup;
+        }
+        gam4980_set_lcd_theme((u32)g_lcd_theme);
+        if (load_game(g_file_selector.path) <= 0) {
+            bda_msgbox(
+                k_window_title,
+                "The selected .gam file is invalid or unreadable."
+            );
+            result = -6;
+            goto cleanup;
+        }
+        log_hex_value("GAME SIZE=", g_loaded_game_size);
+        if (!run_window()) {
+            bda_msgbox(
+                k_window_title, "Could not create the emulator window."
+            );
+            result = -7;
+            goto cleanup;
+        }
+        write_save();
+        release_buffers();
+        g_save_path[0] = 0;
+        if (g_session_action == SESSION_ACTION_RESTART) {
+            log_line("RESTARTING GAME");
+            continue;
+        }
+        if (g_session_action == SESSION_ACTION_CHANGE_GAME) {
+            log_line("OPENING GAME SELECTOR");
+            select_game = 1;
+            continue;
+        }
+        break;
     }
 
 cleanup:
-    log_line("END");
     release_buffers();
+    log_line("END");
     return result;
 }
 

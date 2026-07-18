@@ -15,8 +15,17 @@
 #define GAM4980_SAVE_SIZE 0x14000u
 #define GAM4980_GAME_MAX_SIZE 0x1e0000u
 #define GAM4980_GAME_HEADER_SIZE 0x46u
+#define GAM4980_AUDIO_SAMPLE_RATE 22050u
 
 enum gam4980_key {
+    GAM4980_KEY_POWER = 0x00,
+    GAM4980_KEY_MENU = 0x01,
+    GAM4980_KEY_EC_SJ = 0x02,
+    GAM4980_KEY_EC_SW = 0x03,
+    GAM4980_KEY_CE = 0x04,
+    GAM4980_KEY_DIALOG = 0x05,
+    GAM4980_KEY_DOWNLOAD = 0x06,
+    GAM4980_KEY_SPEAK = 0x07,
     GAM4980_KEY_1 = 0x08,
     GAM4980_KEY_2 = 0x09,
     GAM4980_KEY_3 = 0x0a,
@@ -71,6 +80,14 @@ enum gam4980_key {
     GAM4980_KEY_PAGE_DOWN = 0x3b,
 };
 
+enum gam4980_lcd_theme {
+    GAM4980_LCD_THEME_OFF = 0,
+    GAM4980_LCD_THEME_GREEN,
+    GAM4980_LCD_THEME_BLUE,
+    GAM4980_LCD_THEME_YELLOW,
+    GAM4980_LCD_THEME_COUNT,
+};
+
 typedef struct gam4980_buffers {
     u8 *ram;
     u8 *flash;
@@ -85,12 +102,18 @@ u8 *gam4980_game_storage(void);
 int gam4980_load_game_header(const u8 *header, u32 size);
 void gam4980_key_down(u8 key);
 void gam4980_step_frame(void);
+u32 gam4980_audio_available(void);
+u32 gam4980_audio_read(s16 *samples, u32 count);
+u32 gam4980_audio_dropped(void);
 int gam4980_render_frame(void);
 void gam4980_run_frame(void);
 int gam4980_cpu_halted(void);
 const u8 *gam4980_packed_frame(void);
 const u16 *gam4980_expand_frame(const u8 *packed_frame);
 const u16 *gam4980_framebuffer(void);
+void gam4980_set_lcd_theme(u32 theme);
+u16 gam4980_lcd_background_color(void);
+u16 gam4980_lcd_foreground_color(void);
 u8 *gam4980_save_data(void);
 int gam4980_save_dirty(void);
 void gam4980_save_mark_clean(void);

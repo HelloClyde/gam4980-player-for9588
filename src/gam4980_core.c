@@ -39,6 +39,8 @@
 #define _ST3LD          0x229
 #define _ST4LD          0x22a
 #define _MTCT           0x22b
+#define _ML1D           0x22c
+#define _ML2D           0x22d
 #define _STCTCON        0x22e
 #define _CTLD           0x22f
 #define _ALMMIN         0x230
@@ -52,6 +54,7 @@
 #define _RTCDAYH        0x238
 #define _IER            0x23a
 #define _TIER           0x23b
+#define _VOLCON         0x23e
 #define _AUDCON         0x23f
 #define _KEYCODE        0x24e
 #define _MACCTL         0x260
@@ -63,6 +66,12 @@
 #define LCD_HEIGHT GAM4980_LCD_HEIGHT
 #define LCD_STRIDE GAM4980_LCD_STRIDE
 #define LCD_PACKED_STRIDE GAM4980_LCD_PACKED_STRIDE
+
+#define CPU_CLOCK_HZ 4000000u
+#define MELODY_CLOCK_HZ (CPU_CLOCK_HZ / 64u)
+#define AUDIO_RING_CAPACITY 4096u
+#define AUDIO_RING_MASK (AUDIO_RING_CAPACITY - 1u)
+#define AUDIO_CHANNEL_AMPLITUDE 4096
 
 static uint16_t *fb;
 static int shutdown_requested;
@@ -77,6 +86,14 @@ static uint8_t lcd_frame[GAM4980_LCD_PACKED_SIZE];
 static int lcd_frame_valid;
 static int lcd_dirty;
 static int save_dirty;
+static int16_t audio_ring[AUDIO_RING_CAPACITY];
+static uint32_t audio_ring_read;
+static uint32_t audio_ring_write;
+static uint32_t audio_ring_count;
+static uint32_t audio_ring_drops;
+static uint32_t audio_sample_clock;
+static uint32_t audio_tone_phase[2];
+static uint8_t audio_tone_output[2];
 
 
 static void sys_isr(void);
@@ -88,6 +105,40 @@ static uint16_t mem_read16(uint16_t addr);
 static uint16_t mem_readx16(uint16_t addr);
 static uint16_t mem_read16_wrapped(uint16_t addr);
 static void mem_write(uint16_t addr, uint8_t val);
+static int16_t audio_mix_sample(void);
+
+static void audio_reset(void)
+{
+    bda_memset(audio_ring, 0, sizeof(audio_ring));
+    audio_ring_read = 0;
+    audio_ring_write = 0;
+    audio_ring_count = 0;
+    audio_ring_drops = 0;
+    audio_sample_clock = 0;
+    bda_memset(audio_tone_phase, 0, sizeof(audio_tone_phase));
+    bda_memset(audio_tone_output, 0, sizeof(audio_tone_output));
+}
+
+static void audio_push_sample(int16_t sample)
+{
+    if (audio_ring_count == AUDIO_RING_CAPACITY) {
+        audio_ring_read = (audio_ring_read + 1u) & AUDIO_RING_MASK;
+        --audio_ring_count;
+        ++audio_ring_drops;
+    }
+    audio_ring[audio_ring_write] = sample;
+    audio_ring_write = (audio_ring_write + 1u) & AUDIO_RING_MASK;
+    ++audio_ring_count;
+}
+
+static void audio_advance(uint32_t cycles)
+{
+    audio_sample_clock += cycles * GAM4980_AUDIO_SAMPLE_RATE;
+    while (audio_sample_clock >= CPU_CLOCK_HZ) {
+        audio_sample_clock -= CPU_CLOCK_HZ;
+        audio_push_sample(audio_mix_sample());
+    }
+}
 
 #define READ8(addr)       mem_read(addr)
 #define READX8(addr)      mem_readx(addr)
@@ -120,8 +171,58 @@ static struct {
     uint16_t     bk_sys_d;
 } sys;
 
-static const uint16_t lcd_bg = 0xd6da;
-static const uint16_t lcd_fg = 0x0000;
+static uint32_t audio_volume_level(uint8_t value)
+{
+    static const uint8_t volume_registers[14] = {
+        0xe3, 0xd3, 0xb3, 0x93, 0x73, 0x53, 0x33,
+        0x13, 0xa3, 0x83, 0x63, 0x43, 0x23, 0x03,
+    };
+    uint32_t level;
+
+    for (level = 0; level < 14u; ++level) {
+        if (volume_registers[level] == value)
+            return level;
+    }
+    return 9u;
+}
+
+static int16_t audio_mix_sample(void)
+{
+    uint32_t level = audio_volume_level(sys.ram[_VOLCON]);
+    int32_t amplitude = (AUDIO_CHANNEL_AMPLITUDE * (int32_t)level) / 13;
+    int32_t mixed = 0;
+    uint32_t channel;
+
+    for (channel = 0; channel < 2u; ++channel) {
+        uint8_t enabled = (uint8_t)(0x40u << channel);
+
+        if (sys.ram[_AUDCON] & enabled) {
+            uint32_t reload = sys.ram[_ML1D + channel];
+            uint32_t threshold =
+                GAM4980_AUDIO_SAMPLE_RATE * (256u - reload);
+
+            audio_tone_phase[channel] += MELODY_CLOCK_HZ;
+            while (audio_tone_phase[channel] >= threshold) {
+                audio_tone_phase[channel] -= threshold;
+                audio_tone_output[channel] ^= 1u;
+            }
+            mixed += audio_tone_output[channel] ? amplitude : -amplitude;
+        } else {
+            audio_tone_phase[channel] = 0;
+            audio_tone_output[channel] = 0;
+        }
+    }
+    return (int16_t)mixed;
+}
+
+static const uint16_t lcd_theme_colors[GAM4980_LCD_THEME_COUNT][2] = {
+    { 0xd6da, 0x0000 },
+    { 0x96e1, 0x0882 },
+    { 0x3edd, 0x09a8 },
+    { 0xf72c, 0x2920 },
+};
+static uint16_t lcd_bg = 0xd6da;
+static uint16_t lcd_fg = 0x0000;
 
 static void init_lcd_lut(void)
 {
@@ -136,6 +237,25 @@ static void init_lcd_lut(void)
         lcd_nibble_lut[nibble][0] = (uint32_t)p0 | (uint32_t)p1 << 16;
         lcd_nibble_lut[nibble][1] = (uint32_t)p2 | (uint32_t)p3 << 16;
     }
+}
+
+void gam4980_set_lcd_theme(u32 theme)
+{
+    if (theme >= GAM4980_LCD_THEME_COUNT)
+        theme = GAM4980_LCD_THEME_OFF;
+    lcd_bg = lcd_theme_colors[theme][0];
+    lcd_fg = lcd_theme_colors[theme][1];
+    init_lcd_lut();
+}
+
+u16 gam4980_lcd_background_color(void)
+{
+    return lcd_bg;
+}
+
+u16 gam4980_lcd_foreground_color(void)
+{
+    return lcd_fg;
 }
 
 static void s6502_push(uint8_t val)
@@ -297,9 +417,29 @@ static uint8_t ram_read(uint16_t addr)
 
 static void ram_write(uint16_t addr, uint8_t val)
 {
+    uint8_t previous = sys.ram[addr];
+
     if (addr >= 0x0400u && addr <= 0x1000u && sys.ram[addr] != val)
         lcd_dirty = 1;
     sys.ram[addr] = val;
+
+    if (previous != val) {
+        if (addr == _ML1D || addr == _ML2D) {
+            uint32_t channel = addr - _ML1D;
+            audio_tone_phase[channel] = 0;
+            audio_tone_output[channel] = 0;
+        } else if (addr == _AUDCON) {
+            uint8_t changed = (uint8_t)(previous ^ val);
+            uint32_t channel;
+
+            for (channel = 0; channel < 2u; ++channel) {
+                if (changed & (uint8_t)(0x40u << channel)) {
+                    audio_tone_phase[channel] = 0;
+                    audio_tone_output[channel] = 0;
+                }
+            }
+        }
+    }
 
     // XXX: Disable ROM (0x400000-0x7fffff) channels and audio.
     if (addr == _PB)
@@ -800,8 +940,6 @@ static void sys_init(const char *romdir)
 
 static void sys_keydown(uint8_t key)
 {
-    if (key == 0)
-        return;
     sys.ram[_SYSCON] &= 0xf7;
     sys.ram[_KEYCODE] = key | 0x80;
     sys.ram[_ISR] |= 0x80;
@@ -841,7 +979,8 @@ int gam4980_init(const gam4980_buffers_t *buffers)
     lcd_frame_valid = 0;
     lcd_dirty = 1;
     save_dirty = 0;
-    init_lcd_lut();
+    audio_reset();
+    gam4980_set_lcd_theme(GAM4980_LCD_THEME_OFF);
     sys.flash_cmd = 0;
     sys.flash_cycles = 0;
     sys.ram[_INCR] = 0x0f;
@@ -864,6 +1003,7 @@ int gam4980_init(const gam4980_buffers_t *buffers)
     sys.bk_sys_d = sys.bk_tab[0xd];
     if (sys.bk_sys_d != 0x0ea8 && sys.bk_sys_d != 0x0e88)
         return -3;
+    audio_reset();
     return 1;
 }
 
@@ -976,6 +1116,16 @@ static void sys_timer(uint32_t n)
             }
         }
     }
+
+    if (sys.ram[_TIER] & 0x20u) {
+        uint32_t melody = sys.ram[_MTCT] + n;
+
+        sys.ram[_MTCT] = (uint8_t)melody;
+        if (melody >= 0x100u) {
+            sys.ram[_TISR] |= 0x20u;
+            sys.ram[_SYSCON] &= 0xf7u;
+        }
+    }
  }
 
 static uint32_t sys_ticks_until_timer_event(uint32_t maximum)
@@ -991,6 +1141,11 @@ static uint32_t sys_ticks_until_timer_event(uint32_t maximum)
     }
     if (sys.ram[_STCTCON] & 0x10u) {
         uint32_t remaining = 0x1000u - timer_ticks[4];
+        if (remaining < result)
+            result = remaining;
+    }
+    if ((sys.ram[_TIER] & 0x20u) && !(sys.ram[_TISR] & 0x20u)) {
+        uint32_t remaining = 0x100u - sys.ram[_MTCT];
         if (remaining < result)
             result = remaining;
     }
@@ -1090,11 +1245,15 @@ static void sys_step()
             uint32_t ticks = (step_cycles - step_ticked - 1u) / tstep;
             ticks = sys_ticks_until_timer_event(ticks);
             step_ticked += ticks * tstep;
+            audio_advance(ticks * tstep);
             sys_timer(ticks);
         } else {
             uint32_t p = step_ticked / tstep;
+            uint32_t executed;
             sys_isr();
-            step_ticked += s6502_exec(&sys.cpu, 0x100);
+            executed = s6502_exec(&sys.cpu, 0x100);
+            step_ticked += executed;
+            audio_advance(executed);
             uint32_t q = step_ticked / tstep;
             sys_timer(q - p);
         }
@@ -1386,6 +1545,32 @@ void gam4980_step_frame(void)
     }
 }
 
+u32 gam4980_audio_available(void)
+{
+    return audio_ring_count;
+}
+
+u32 gam4980_audio_read(s16 *samples, u32 count)
+{
+    u32 copied = 0;
+
+    if (!samples)
+        return 0;
+    if (count > audio_ring_count)
+        count = audio_ring_count;
+    while (copied < count) {
+        samples[copied++] = audio_ring[audio_ring_read];
+        audio_ring_read = (audio_ring_read + 1u) & AUDIO_RING_MASK;
+    }
+    audio_ring_count -= copied;
+    return copied;
+}
+
+u32 gam4980_audio_dropped(void)
+{
+    return audio_ring_drops;
+}
+
 int gam4980_render_frame(void)
 {
     int changed = 0;
@@ -1587,4 +1772,5 @@ void gam4980_deinit(void)
     lcd_frame_valid = 0;
     lcd_dirty = 0;
     save_dirty = 0;
+    audio_reset();
 }
