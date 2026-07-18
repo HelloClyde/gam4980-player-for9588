@@ -2,6 +2,10 @@ name: Build BDA release
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - "*"
   pull_request:
   workflow_dispatch:
 
@@ -16,6 +20,11 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 20
+    outputs:
+      bda_artifact_id: ${{ steps.upload_bda.outputs.artifact-id }}
+      bda_sha256: ${{ steps.upload_bda.outputs.artifact-digest }}
+      zip_artifact_id: ${{ steps.upload_zip.outputs.artifact-id }}
+      zip_sha256: ${{ steps.upload_zip.outputs.artifact-digest }}
     env:
       PYTHONUTF8: "1"
 
@@ -86,6 +95,7 @@ jobs:
         run: python package_release.py
 
       - name: Upload BDA
+        id: upload_bda
         uses: actions/upload-artifact@v7
         with:
           path: 应用/程序/GAM4980.BDA
@@ -94,9 +104,85 @@ jobs:
           retention-days: 30
 
       - name: Upload install ZIP
+        id: upload_zip
         uses: actions/upload-artifact@v7
         with:
           path: build/gam4980-player-for9588.zip
           archive: false
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download and verify release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BDA_ARTIFACT_ID: ${{ needs.build.outputs.bda_artifact_id }}
+          BDA_SHA256: ${{ needs.build.outputs.bda_sha256 }}
+          ZIP_ARTIFACT_ID: ${{ needs.build.outputs.zip_artifact_id }}
+          ZIP_SHA256: ${{ needs.build.outputs.zip_sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          New-Item -ItemType Directory -Path release-assets | Out-Null
+          $apiRoot = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts"
+          Invoke-WebRequest `
+            -Uri "$apiRoot/$env:BDA_ARTIFACT_ID/zip" `
+            -Headers $headers `
+            -OutFile "release-assets/GAM4980.BDA"
+          Invoke-WebRequest `
+            -Uri "$apiRoot/$env:ZIP_ARTIFACT_ID/zip" `
+            -Headers $headers `
+            -OutFile "release-assets/gam4980-player-for9588.zip"
+
+          $expected = @{
+            "release-assets/GAM4980.BDA" = $env:BDA_SHA256
+            "release-assets/gam4980-player-for9588.zip" = $env:ZIP_SHA256
+          }
+          foreach ($path in $expected.Keys) {
+            $actual = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant()
+            $wanted = $expected[$path].ToLowerInvariant() -replace "^sha256:", ""
+            if ($actual -ne $wanted) {
+              throw "Artifact checksum mismatch: $path"
+            }
+          }
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:GITHUB_REF_NAME
+          $repo = $env:GITHUB_REPOSITORY
+          $assets = @(
+            "release-assets/gam4980-player-for9588.zip"
+            "release-assets/GAM4980.BDA"
+          )
+
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --repo $repo --clobber
+          } else {
+            gh release create $tag @assets `
+              --repo $repo `
+              --verify-tag `
+              --generate-notes `
+              --title "gam4980-player-for9588 $tag"
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to publish GitHub release $tag."
+          }

@@ -69,8 +69,18 @@ python .\package_release.py
 
 ## GitHub Actions
 
-`.github/workflows/build-release.yml` 会在 push、pull request 和手动触发时
-构建 BDA 和安装 ZIP，并分别上传两个构建产物。
+`.github/workflows/build-release.yml` 会在 `main` push、pull request、tag
+push 和手动触发时构建 BDA 和安装 ZIP，并分别上传两个构建产物。push 任意
+tag 后，工作流还会自动创建同名 GitHub Release，并附加
+`gam4980-player-for9588.zip` 和 `GAM4980.BDA`。同一 tag 的工作流重跑会覆盖
+已有 Release 附件。
+
+例如发布 `v0.1.0`：
+
+```powershell
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
 
 SDK 子模块是私有仓库，因此播放器仓库需要配置 Actions secret
 `SDK_DEPLOY_KEY`。其公钥应作为只读 deploy key 添加到
