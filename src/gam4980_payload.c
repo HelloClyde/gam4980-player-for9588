@@ -1814,8 +1814,10 @@ static void show_help_page(void)
     clear_frame_queue();
     g_touch_read = g_touch_write;
     g_escape_pending = 0;
+    log_line("HELP PAGE REQUESTED");
     audio_stream_stop();
-    result = bda_help_page(g_frame, k_help_title, k_help_body);
+    release_draw_context();
+    result = bda_help_page(0, k_help_title, k_help_body);
     if (result != BDA_HELP_PAGE_COMPLETED) {
         log_line("HELP PAGE ERROR");
         (void)bda_msgbox(k_window_title, "Help page error.");
@@ -1824,8 +1826,15 @@ static void show_help_page(void)
     }
     g_touch_read = g_touch_write;
     sync_previous_keys();
-    audio_stream_start();
     g_full_redraw = 1;
+    if (g_frame && (s32)g_frame != -1) {
+        (void)bda_gui_frame_activate(g_frame, 0x100u);
+        if (!acquire_draw_context(g_frame))
+            log_line("HELP DRAW RESTORE ERROR");
+        else
+            log_line("HELP DRAW RESTORED");
+    }
+    audio_stream_start();
 }
 
 static void cycle_lcd_theme(void)
