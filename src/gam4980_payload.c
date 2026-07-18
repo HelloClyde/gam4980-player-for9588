@@ -1,4 +1,5 @@
 #include "bda_audio.h"
+#include "bda_dialogs.h"
 #include "gam4980_core.h"
 
 /* GCC may lower small initialized-array copies to these freestanding symbols. */
@@ -134,6 +135,25 @@ static const char k_log_path[] =
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\GAM4980.LOG";
 static const char k_config_path[] =
     "A:\\\xd3\xa6\xd3\xc3\\\xca\xfd\xbe\xdd\\\xd3\xce\xcf\xb7\\gam4980\\GAM4980.CFG";
+static const char k_help_title[] = "GAM4980 \xb0\xef\xd6\xfa";
+static const char k_help_body[] =
+    "\xb9\xa6\xc4\xdc\xcb\xb5\xc3\xf7\n"
+    "\n"
+    "\xb7\xbd\xcf\xf2\xbc\xfc\xa3\xba\xd2\xc6\xb6\xaf\xbb\xf2\xd1\xa1\xd4\xf1\n"
+    "ENTER\xa3\xba\xc8\xb7\xc8\xcf\n"
+    "EXIT\xa3\xba\xb7\xb5\xbb\xd8\xa3\xac\xb3\xa4\xb0\xb4\xcd\xcb\xb3\xf6\xd3\xa6\xd3\xc3\n"
+    "PGUP/PGDN\xa3\xba\xb7\xad\xd2\xb3\n"
+    "\xce\xc4\xbc\xfe\xbc\xd0\xa3\xba\xd6\xd8\xd0\xc2\xd1\xa1\xd4\xf1\xd3\xce\xcf\xb7\n"
+    "\xbc\xfc\xc5\xcc\xa3\xba\xc7\xd0\xbb\xbb\xc8\xed\xbc\xfc\xc5\xcc/\xca\xd6\xb1\xfa\n"
+    "ABC/FN\xa3\xba\xc7\xd0\xbb\xbb\xd7\xd6\xb7\xfb/\xb9\xa6\xc4\xdc\xbc\xfc\xc5\xcc\n"
+    "\xb3\xdd\xc2\xd6\xa3\xba\xcf\xd4\xca\xbe\xa1\xa2\xd2\xf4\xc6\xb5\xd3\xeb\xd3\xce\xcf\xb7\xc9\xe8\xd6\xc3\n"
+    "\xce\xca\xba\xc5\xa3\xba\xb4\xf2\xbf\xaa\xb1\xbe\xb0\xef\xd6\xfa\n"
+    "\xb4\xe6\xb5\xb5\xa3\xba\xd3\xeb .gam \xce\xc4\xbc\xfe\xcd\xac\xc4\xbf\xc2\xbc\n"
+    "\n"
+    "gam4980\xba\xcb\xd0\xc4\xd7\xf7\xd5\xdf\xa3\xbaiyzsong\n"
+    "9x88\xd2\xc6\xd6\xb2\xd7\xf7\xd5\xdf\xa3\xbaHelloClyde\n"
+    "\xcc\xd6\xc2\xdbQ\xc8\xba\xa3\xba"
+    "830340878\n";
 
 static const touch_button_t k_gamepad_buttons[] = {
     { 52, 185, 38, 38, GAM4980_KEY_UP, 0, 1 },
@@ -219,7 +239,8 @@ static const touch_button_t k_function_keyboard_buttons[] = {
     { 192, 277, 44, 27, GAM4980_KEY_PAGE_DOWN,"PGDN",  1 },
 };
 
-static const ui_rect_t k_keyboard_page_button = { 104, SETTINGS_ROW_Y, 32, 22 };
+static const ui_rect_t k_keyboard_page_button = { 72, SETTINGS_ROW_Y, 32, 22 };
+static const ui_rect_t k_help_button = { 108, SETTINGS_ROW_Y, 28, 22 };
 static const ui_rect_t k_change_game_button = { 140, SETTINGS_ROW_Y, 28, 22 };
 static const ui_rect_t k_input_panel_button = { 172, SETTINGS_ROW_Y, 28, 22 };
 static const ui_rect_t k_settings_button = { 204, SETTINGS_ROW_Y, 28, 22 };
@@ -1003,6 +1024,27 @@ static void draw_gear_icon(int center_x, int center_y, u16 color, u16 hole)
     fill_rect(center_x - 3, center_y, 7, 1, hole);
 }
 
+static void draw_help_icon(int center_x, int center_y, u16 color)
+{
+    static const u8 rows[7] = {
+        0x0e, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04,
+    };
+    int row;
+    int column;
+
+    for (row = 0; row < 7; ++row) {
+        for (column = 0; column < 5; ++column) {
+            if (rows[row] & (1u << (4 - column))) {
+                fill_rect(
+                    center_x - 5 + column * 2,
+                    center_y - 7 + row * 2,
+                    2, 2, color
+                );
+            }
+        }
+    }
+}
+
 static void draw_keyboard_icon(int center_x, int center_y, u16 color)
 {
     int column;
@@ -1116,6 +1158,20 @@ static void draw_settings_row(void)
             k_keyboard_page_button.y + 8, page_label, 1, text
         );
     }
+
+    fill_rect(
+        k_help_button.x, k_help_button.y,
+        k_help_button.width, k_help_button.height, accent
+    );
+    fill_rect(
+        k_help_button.x + 2, k_help_button.y + 2,
+        k_help_button.width - 4, k_help_button.height - 4, fill
+    );
+    draw_help_icon(
+        k_help_button.x + k_help_button.width / 2,
+        k_help_button.y + k_help_button.height / 2,
+        text
+    );
 
     fill_rect(
         k_change_game_button.x, k_change_game_button.y,
@@ -1713,6 +1769,29 @@ static void confirm_change_game(void)
     }
 }
 
+static void show_help_page(void)
+{
+    int result;
+
+    release_touch_key();
+    sync_previous_keys();
+    clear_frame_queue();
+    g_touch_read = g_touch_write;
+    g_escape_pending = 0;
+    audio_stream_stop();
+    result = bda_help_page(g_frame, k_help_title, k_help_body);
+    if (result != BDA_HELP_PAGE_COMPLETED) {
+        log_line("HELP PAGE ERROR");
+        (void)bda_msgbox(k_window_title, "Help page error.");
+    } else {
+        log_line("HELP PAGE CLOSED");
+    }
+    g_touch_read = g_touch_write;
+    sync_previous_keys();
+    audio_stream_start();
+    g_full_redraw = 1;
+}
+
 static void cycle_lcd_theme(void)
 {
     ++g_lcd_theme;
@@ -1849,6 +1928,10 @@ static void handle_touch_release(int x, int y)
                 return;
             }
         }
+        return;
+    }
+    if (point_in_rect(x, y, &k_help_button)) {
+        show_help_page();
         return;
     }
     if (point_in_rect(x, y, &k_change_game_button)) {
