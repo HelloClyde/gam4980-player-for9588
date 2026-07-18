@@ -933,15 +933,19 @@ static void draw_arrow(const touch_button_t *button)
             int y = button->key == GAM4980_KEY_UP ? cy - 12 + row : cy + 12 - row;
             fill_rect(cx - width / 2, y, width, 1, color);
         }
-        fill_rect(cx - 3, cy - 1, 7, 13, color);
+        if (button->key == GAM4980_KEY_UP)
+            fill_rect(cx - 3, cy - 1, 7, 13, color);
+        else
+            fill_rect(cx - 3, cy - 11, 7, 13, color);
     } else {
         for (row = 0; row < 11; ++row) {
             int height = row * 2 + 1;
             int x = button->key == GAM4980_KEY_LEFT ? cx - 12 + row : cx + 12 - row;
             fill_rect(x, cy - height / 2, 1, height, color);
         }
-        fill_rect(cx - 1, cy - 3, 13, 7, color);
-        if (button->key == GAM4980_KEY_RIGHT)
+        if (button->key == GAM4980_KEY_LEFT)
+            fill_rect(cx - 1, cy - 3, 13, 7, color);
+        else
             fill_rect(cx - 11, cy - 3, 13, 7, color);
     }
 }
