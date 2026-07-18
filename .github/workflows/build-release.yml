@@ -1,0 +1,100 @@
+name: Build BDA release
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out player repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: false
+
+      - name: Check out private SDK submodule
+        shell: pwsh
+        env:
+          SDK_DEPLOY_KEY: ${{ secrets.SDK_DEPLOY_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ([string]::IsNullOrWhiteSpace($env:SDK_DEPLOY_KEY)) {
+            throw "Repository secret SDK_DEPLOY_KEY is required to read the private SDK submodule."
+          }
+
+          $keyPath = Join-Path $env:RUNNER_TEMP "bbk9588_sdk_deploy_key"
+          $keyText = $env:SDK_DEPLOY_KEY.Replace("`r", "").TrimEnd() + "`n"
+          [IO.File]::WriteAllText(
+            $keyPath,
+            $keyText,
+            [Text.UTF8Encoding]::new($false)
+          )
+          & icacls.exe $keyPath /inheritance:r /grant:r "${env:USERNAME}:R" | Out-Null
+
+          git submodule sync -- bbk9588-bda-sdk
+          git config submodule.bbk9588-bda-sdk.url `
+            ssh://git@ssh.github.com:443/HelloClyde/bbk9588-bda-sdk.git
+          $env:GIT_SSH_COMMAND = `
+            "ssh -i `"$keyPath`" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          try {
+            git submodule update --init --depth 1 -- bbk9588-bda-sdk
+          } finally {
+            Remove-Item Env:GIT_SSH_COMMAND -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+          }
+
+          $expected = git rev-parse HEAD:bbk9588-bda-sdk
+          $actual = git -C bbk9588-bda-sdk rev-parse HEAD
+          if ($actual -ne $expected) {
+            throw "SDK checkout mismatch: expected $expected, got $actual"
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Restore MIPS toolchain
+        uses: actions/cache@v6
+        with:
+          path: bbk9588-bda-sdk/tools
+          key: windows-mipsel-none-elf-15.2.0-v1
+
+      - name: Install MIPS toolchain
+        shell: pwsh
+        run: ./bbk9588-bda-sdk/scripts/setup_toolchain.ps1
+
+      - name: Build BDA
+        run: python build.py --output "应用/程序/GAM4980.BDA"
+
+      - name: Build install ZIP
+        run: python package_release.py
+
+      - name: Upload BDA
+        uses: actions/upload-artifact@v7
+        with:
+          path: 应用/程序/GAM4980.BDA
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload install ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          path: build/gam4980-player-for9588.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 30

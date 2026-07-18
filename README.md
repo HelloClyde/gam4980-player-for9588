@@ -4,8 +4,9 @@
 
 本项目与 SDK 示例相互独立。它会构建一个拥有独立入口、图标、系统文件
 选择器和 9588 裸机载荷的 `GAM4980.BDA`，不会读取或修改其他 BDA 作为
-模板。载荷只包含父级 SDK 的正式头文件 `sdk/include/bda_sdk.h` 和
-`sdk/include/bda_audio.h`，构建过程不依赖研究头文件或 `reverse` 目录。
+模板。载荷只使用 `bbk9588-bda-sdk` Git 子模块中的正式头文件
+`sdk/include/bda_sdk.h` 和 `sdk/include/bda_audio.h`，构建过程不访问
+父级目录，也不依赖研究头文件或 `reverse` 目录。
 
 ## 运行要求
 
@@ -24,8 +25,8 @@
   A:\应用\数据\游戏\gam4980\E.BIN
   ```
 
-- 使用父级 9588 SDK 自带或已配置的 MIPS 工具链。
-- 父级 SDK 的正式头文件需要包含已验证的堆内存、文件定位、系统文件
+- 初始化 `bbk9588-bda-sdk` 子模块，并使用子模块提供的工具链安装脚本。
+- SDK 子模块的正式头文件需要包含已验证的堆内存、文件定位、系统文件
   选择器、窗口生命周期、原始 RGB565 图片和 PCM 音频 API。
 
 除上述两个已白名单收录的运行时文件外，其他固件镜像、游戏、
@@ -39,15 +40,42 @@ A:\gam4980\
 
 ## 构建
 
-在 SDK 工作区根目录执行：
+在本项目根目录执行：
 
 ```powershell
-python .\gam4980-player-for9588\build.py
-python -m bda_packer.validate .\gam4980-player-for9588\build\GAM4980.BDA
+git submodule update --init bbk9588-bda-sdk
+.\bbk9588-bda-sdk\scripts\setup_toolchain.ps1
+python .\build.py
 ```
 
 仓库内的 `应用` 目录树可直接作为 NAND 或设备文件部署输入，
 后续构建和安装无需再从外部附件查找这两个 ROM。
+要生成可直接覆盖到 9588 的安装包，执行：
+
+```powershell
+python .\build.py --output ".\应用\程序\GAM4980.BDA"
+python .\package_release.py
+```
+
+输出为 `build\gam4980-player-for9588.zip`，其中只包含：
+
+```text
+应用/程序/GAM4980.BDA
+应用/数据/游戏/gam4980/8.BIN
+应用/数据/游戏/gam4980/E.BIN
+```
+
+解压 ZIP 后将 `应用` 目录覆盖到 9588 的 `A:\`。
+
+## GitHub Actions
+
+`.github/workflows/build-release.yml` 会在 push、pull request 和手动触发时
+构建 BDA 和安装 ZIP，并分别上传两个构建产物。
+
+SDK 子模块是私有仓库，因此播放器仓库需要配置 Actions secret
+`SDK_DEPLOY_KEY`。其公钥应作为只读 deploy key 添加到
+`HelloClyde/bbk9588-bda-sdk`，私钥保存为该 secret。工作流只把私钥写入
+runner 临时目录，并在子模块检出后立即删除。
 
 应用通过正式 API `bda_gui_select_file()` 打开固件系统文件选择器。选择器
 默认进入 `A:\gam4980\`，并只显示 `.gam` 文件。选中的游戏会直接流式写入

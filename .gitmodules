@@ -1,0 +1,3 @@
+[submodule "bbk9588-bda-sdk"]
+	path = bbk9588-bda-sdk
+	url = https://github.com/HelloClyde/bbk9588-bda-sdk.git

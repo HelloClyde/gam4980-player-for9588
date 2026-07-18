@@ -9,7 +9,14 @@ import tempfile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SDK_ROOT = PROJECT_ROOT.parent
+SDK_ROOT = PROJECT_ROOT / "bbk9588-bda-sdk"
+BUILD_ROOT = PROJECT_ROOT / "build"
+
+if not (SDK_ROOT / "bda_packer").is_dir():
+    raise SystemExit(
+        "missing bbk9588-bda-sdk submodule; run "
+        "git submodule update --init bbk9588-bda-sdk"
+    )
 sys.path.insert(0, str(SDK_ROOT))
 
 from bda_packer.build import (  # noqa: E402
@@ -166,8 +173,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    BUILD_ROOT.mkdir(parents=True, exist_ok=True)
     prefix = args.prefix or bundled_prefix() or "mipsel-none-elf-"
-    payload = compile_payload(prefix, args.output.parent)
+    payload = compile_payload(prefix, BUILD_ROOT)
     data = package_bda(payload)
     args.output.write_bytes(data)
 
