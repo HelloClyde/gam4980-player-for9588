@@ -15,7 +15,6 @@
 #define GAM4980_SAVE_SIZE 0x14000u
 #define GAM4980_GAME_MAX_SIZE 0x1e0000u
 #define GAM4980_GAME_HEADER_SIZE 0x46u
-#define GAM4980_AUDIO_SAMPLE_RATE 22050u
 
 enum gam4980_key {
     GAM4980_KEY_POWER = 0x00,
@@ -102,9 +101,6 @@ u8 *gam4980_game_storage(void);
 int gam4980_load_game_header(const u8 *header, u32 size);
 void gam4980_key_down(u8 key);
 void gam4980_step_frame(void);
-u32 gam4980_audio_available(void);
-u32 gam4980_audio_read(s16 *samples, u32 count);
-u32 gam4980_audio_dropped(void);
 int gam4980_render_frame(void);
 void gam4980_run_frame(void);
 int gam4980_cpu_halted(void);

@@ -1,4 +1,3 @@
-#include "bda_audio.h"
 #include "bda_dialogs.h"
 #include "gam4980_core.h"
 
@@ -20,16 +19,6 @@ void *memset(void *destination, int value, bda_size_t size)
 #define SCREEN_FRAME_BYTES (SCREEN_WIDTH * SCREEN_HEIGHT * 2u)
 #define LCD_SOURCE_WIDTH (GAM4980_LCD_WIDTH + 1)
 #define CORE_FRAME_BYTES (LCD_SOURCE_WIDTH * GAM4980_LCD_HEIGHT * 2u)
-#define FRAME_QUEUE_CAPACITY 32u
-#define FRAME_QUEUE_BYTES \
-    (GAM4980_LCD_PACKED_SIZE * FRAME_QUEUE_CAPACITY)
-#define FRAME_PRESENT_HOLD_TICKS 3u
-
-#define PCM_SAMPLE_COUNT 512u
-#define PCM_BYTE_COUNT (PCM_SAMPLE_COUNT * (u32)sizeof(s16))
-#define PCM_PREFILL_BLOCK_COUNT 4u
-#define PCM_PUMP_BLOCK_LIMIT 4u
-#define PCM_STOP_DRAIN_TICKS 20u
 
 #define VIEW_X 0
 #define VIEW_Y 9
@@ -45,6 +34,9 @@ void *memset(void *destination, int value, bda_size_t size)
 #define ESCAPE_QUIT_TICKS 40u
 #define SAVE_INTERVAL_TICKS 400u
 #define MAX_CATCHUP_TICKS 8u
+
+/* The compatible-context backend treats a zero copy key as RGB565 black. */
+#define PRESENT_COLOR_KEY BDA_GUI_COLOR_KEY_MAGENTA_RGB565
 
 typedef struct touch_button {
     s32 x;
@@ -92,7 +84,6 @@ enum keyboard_page {
 
 enum settings_tab {
     SETTINGS_TAB_DISPLAY = 0,
-    SETTINGS_TAB_AUDIO,
     SETTINGS_TAB_GAME,
     SETTINGS_TAB_COUNT,
 };
@@ -104,12 +95,6 @@ enum display_settings_item {
     DISPLAY_SETTINGS_LCD_THEME,
     DISPLAY_SETTINGS_LCD_GHOSTING,
     DISPLAY_SETTINGS_ITEM_COUNT,
-};
-
-enum audio_settings_item {
-    AUDIO_SETTINGS_ENABLED = 0,
-    AUDIO_SETTINGS_VOLUME,
-    AUDIO_SETTINGS_ITEM_COUNT,
 };
 
 enum game_settings_item {
@@ -124,6 +109,12 @@ enum session_action {
 };
 
 static const char k_window_title[] = "GAM4980";
+static const char k_change_game_confirm[] =
+    "\xd6\xd8\xd0\xc2\xd1\xa1\xd4\xf1\xd3\xce\xcf\xb7\xc2\xf0\xa3\xbf";
+static const char k_game_exited_text[] =
+    "\xd3\xce\xcf\xb7\xd2\xd1\xcd\xcb\xb3\xf6";
+static const char k_game_exited_action_text[] =
+    "\xc7\xeb\xd6\xd8\xd1\xa1\xbb\xf2\xd6\xd8\xc6\xf4\xd3\xce\xcf\xb7";
 static const char k_game_dir[] = "A:\\gam4980";
 static const char k_game_selector_path[] = "A:\\gam4980\\";
 static const char k_data_dir[] =
@@ -165,13 +156,6 @@ static const char k_help_body[] =
     "\xbf\xc9\xd1\xa1\xa3\xba\xb9\xd8\xb1\xd5/\xc2\xcc\xc9\xab/\xc0\xb6\xc9\xab/\xbb\xc6\xc9\xab\n"
     "GHOST\xa3\xbaLCD\xb2\xd0\xd3\xb0\xbf\xaa\xb9\xd8\n"
     "\xc4\xac\xc8\xcf\xa3\xba\xb9\xd8\xb1\xd5\n"
-    "\n"
-    "AUDIO\n"
-    "AUDIO\xa3\xba\xc9\xf9\xd2\xf4\xbf\xaa\xb9\xd8\xa3\xac\xc4\xac\xc8\xcf\xbf\xaa\xc6\xf4\n"
-    "VOLUME\xa3\xba"
-    "25/50/75/100\n"
-    "\xc4\xac\xc8\xcf\xa3\xba"
-    "100\n"
     "\n"
     "GAME\n"
     "RESTART GAME\xa3\xba\xb1\xa3\xb4\xe6\xb2\xa2\xd6\xd8\xc6\xf4\n"
@@ -273,9 +257,8 @@ static const ui_rect_t k_input_panel_button = { 172, SETTINGS_ROW_Y, 28, 22 };
 static const ui_rect_t k_settings_button = { 204, SETTINGS_ROW_Y, 28, 22 };
 static const ui_rect_t k_settings_close = { 196, 26, 22, 22 };
 static const ui_rect_t k_settings_tabs[SETTINGS_TAB_COUNT] = {
-    { 24, 55, 68, 26 },
-    { 94, 55, 58, 26 },
-    { 154, 55, 62, 26 },
+    { 24, 55, 95, 26 },
+    { 121, 55, 95, 26 },
 };
 static const ui_rect_t k_settings_options[DISPLAY_SETTINGS_ITEM_COUNT] = {
     { 28, 88, 184, 32 },
@@ -291,16 +274,8 @@ static const char *const k_lcd_theme_names[GAM4980_LCD_THEME_COUNT] = {
     "OFF", "GREEN", "BLUE", "YELLOW",
 };
 static const char *const k_settings_tab_names[SETTINGS_TAB_COUNT] = {
-    "DISPLAY", "AUDIO", "GAME",
+    "DISPLAY", "GAME",
 };
-static const u8 k_audio_volume_values[] = {
-    25u, 50u, 75u, 100u,
-};
-static const char *const k_audio_volume_names[] = {
-    "25", "50", "75", "100",
-};
-#define AUDIO_VOLUME_LEVEL_COUNT \
-    ((u32)(sizeof(k_audio_volume_values) / sizeof(k_audio_volume_values[0])))
 
 static const u8 k_font[36][7] = {
     {0x0e,0x11,0x13,0x15,0x19,0x11,0x0e}, {0x04,0x0c,0x04,0x04,0x04,0x04,0x0e},
@@ -330,10 +305,10 @@ static bda_gui_picture_t g_full_picture;
 static u16 *g_scaled_framebuffer;
 static u16 *g_screen_pixels;
 static u16 *g_ghost_framebuffer;
-static u8 *g_frame_queue;
 static bda_handle_t g_frame;
 static bda_handle_t g_draw;
 static bda_handle_t g_draw_owner;
+static bda_handle_t g_back;
 static void *g_draw_object;
 static touch_event_t g_touch_queue[TOUCH_QUEUE_SIZE];
 static volatile u32 g_touch_read;
@@ -353,7 +328,7 @@ static u32 g_core_frame_phase;
 static int g_full_redraw;
 static int g_escape_pending;
 static int g_close_requested;
-static int g_core_break_logged;
+static int g_game_ended;
 static int g_scale_algorithm = SCALE_BILINEAR;
 static int g_input_panel = INPUT_PANEL_GAMEPAD;
 static int g_lcd_theme = GAM4980_LCD_THEME_OFF;
@@ -373,18 +348,6 @@ static int g_settings_tab = SETTINGS_TAB_DISPLAY;
 static int g_settings_selection;
 static int g_settings_key_release_ticks;
 static int g_session_action;
-static u32 g_frame_queue_read;
-static u32 g_frame_queue_write;
-static u32 g_frame_queue_count;
-static u32 g_frame_queue_drops;
-static u32 g_frame_present_hold_ticks;
-static s16 g_pcm[PCM_SAMPLE_COUNT];
-static u32 g_audio_blocks_written;
-static u32 g_audio_write_errors;
-static u32 g_audio_padded_samples;
-static int g_audio_open;
-static int g_audio_enabled = 1;
-static int g_audio_volume = 3;
 
 static void copy_text(char *out, const char *text, u32 capacity)
 {
@@ -443,124 +406,6 @@ static void reset_log(void)
         (void)bda_fs_close_raw(file);
 }
 
-static void audio_stream_stop(void)
-{
-    u32 drain_start;
-
-    if (!g_audio_open)
-        return;
-    g_audio_open = 0;
-    log_line("AUDIO DRAIN");
-    drain_start = bda_gui_tick_count_25ms();
-    while (bda_gui_tick_elapsed_25ms(
-               drain_start, bda_gui_tick_count_25ms()
-           ) < PCM_STOP_DRAIN_TICKS) {
-        bda_sys_delay(1u);
-    }
-    log_line("AUDIO STOP CALL");
-    bda_audio_stop();
-    log_line("AUDIO STOP RETURNED");
-    log_hex_value("AUDIO BLOCKS=", g_audio_blocks_written);
-    log_hex_value("AUDIO ERRORS=", g_audio_write_errors);
-    log_hex_value("AUDIO PADDED=", g_audio_padded_samples);
-    log_hex_value("AUDIO DROPS=", gam4980_audio_dropped());
-    log_line("AUDIO STOP");
-}
-
-static void audio_discard_core(void)
-{
-    u32 available;
-
-    while ((available = gam4980_audio_available()) != 0u) {
-        if (available > PCM_SAMPLE_COUNT)
-            available = PCM_SAMPLE_COUNT;
-        if (gam4980_audio_read(g_pcm, available) != available)
-            break;
-    }
-}
-
-static void audio_apply_volume(u32 sample_count)
-{
-    u32 index;
-    u32 volume = k_audio_volume_values[g_audio_volume];
-
-    if (volume == 100u)
-        return;
-    for (index = 0; index < sample_count; ++index)
-        g_pcm[index] = (s16)(((s32)g_pcm[index] * (s32)volume) / 100);
-}
-
-static void audio_stream_start(void)
-{
-    u32 block;
-
-    if (!g_audio_enabled || g_audio_open)
-        return;
-    audio_discard_core();
-    g_audio_blocks_written = 0;
-    g_audio_write_errors = 0;
-    g_audio_padded_samples = 0;
-    log_line("AUDIO START");
-    bda_audio_open_pcm(
-        BDA_AUDIO_SAMPLE_RATE_22050,
-        BDA_AUDIO_BITS_16,
-        BDA_AUDIO_CHANNELS_MONO
-    );
-    g_audio_open = 1;
-
-    bda_memset(g_pcm, 0, PCM_BYTE_COUNT);
-    for (block = 0; block < PCM_PREFILL_BLOCK_COUNT; ++block) {
-        int written;
-
-        if (!bda_audio_ready())
-            break;
-        written = bda_audio_write(g_pcm, PCM_BYTE_COUNT);
-        if (written != (int)PCM_BYTE_COUNT) {
-            ++g_audio_write_errors;
-            log_line("AUDIO PREFILL FAILED");
-            audio_stream_stop();
-            return;
-        }
-        ++g_audio_blocks_written;
-    }
-}
-
-static void audio_stream_pump(void)
-{
-    u32 blocks = 0;
-
-    while (g_audio_enabled && g_audio_open &&
-           blocks < PCM_PUMP_BLOCK_LIMIT &&
-           bda_audio_ready()) {
-        u32 sample_count = gam4980_audio_available();
-        int written;
-
-        if (sample_count > PCM_SAMPLE_COUNT)
-            sample_count = PCM_SAMPLE_COUNT;
-        if (sample_count < PCM_SAMPLE_COUNT) {
-            bda_memset(g_pcm, 0, PCM_BYTE_COUNT);
-            g_audio_padded_samples += PCM_SAMPLE_COUNT - sample_count;
-        }
-        if (sample_count &&
-            gam4980_audio_read(g_pcm, sample_count) != sample_count) {
-            ++g_audio_write_errors;
-            log_line("AUDIO CORE READ FAILED");
-            audio_stream_stop();
-            return;
-        }
-        audio_apply_volume(sample_count);
-        written = bda_audio_write(g_pcm, PCM_BYTE_COUNT);
-        if (written != (int)PCM_BYTE_COUNT) {
-            ++g_audio_write_errors;
-            log_line("AUDIO WRITE FAILED");
-            audio_stream_stop();
-            return;
-        }
-        ++g_audio_blocks_written;
-        ++blocks;
-    }
-}
-
 static int valid_pointer(const void *pointer)
 {
     return pointer && (s32)(u32)pointer != -1;
@@ -589,8 +434,6 @@ static void release_buffers(void)
         bda_free(g_screen_pixels);
     if (valid_pointer(g_scaled_framebuffer))
         bda_free(g_scaled_framebuffer);
-    if (valid_pointer(g_frame_queue))
-        bda_free(g_frame_queue);
     if (valid_pointer(g_buffers.framebuffer))
         bda_free(g_buffers.framebuffer);
     if (valid_pointer(g_buffers.ram))
@@ -605,7 +448,6 @@ static void release_buffers(void)
     g_ghost_framebuffer = 0;
     g_scaled_framebuffer = 0;
     g_screen_pixels = 0;
-    g_frame_queue = 0;
 }
 
 static int allocate_buffers(void)
@@ -614,7 +456,6 @@ static int allocate_buffers(void)
     g_ghost_framebuffer = 0;
     g_scaled_framebuffer = 0;
     g_screen_pixels = 0;
-    g_frame_queue = 0;
 
     g_buffers.ram = (u8 *)bda_alloc(GAM4980_RAM_SIZE);
     g_buffers.flash = (u8 *)bda_alloc(GAM4980_FLASH_SIZE);
@@ -624,14 +465,12 @@ static int allocate_buffers(void)
     g_ghost_framebuffer = (u16 *)bda_alloc(CORE_FRAME_BYTES);
     g_scaled_framebuffer = (u16 *)bda_alloc(VIEW_FRAME_BYTES);
     g_screen_pixels = (u16 *)bda_alloc(SCREEN_FRAME_BYTES);
-    g_frame_queue = (u8 *)bda_alloc(FRAME_QUEUE_BYTES);
     if (!valid_pointer(g_buffers.ram) || !valid_pointer(g_buffers.flash) ||
         !valid_pointer(g_buffers.rom_8) || !valid_pointer(g_buffers.rom_e) ||
         !valid_pointer(g_buffers.framebuffer) ||
         !valid_pointer(g_ghost_framebuffer) ||
         !valid_pointer(g_scaled_framebuffer) ||
-        !valid_pointer(g_screen_pixels) ||
-        !valid_pointer(g_frame_queue)) {
+        !valid_pointer(g_screen_pixels)) {
         release_buffers();
         return 0;
     }
@@ -664,51 +503,6 @@ static int allocate_buffers(void)
     return 1;
 }
 
-static void clear_frame_queue(void)
-{
-    g_frame_queue_read = 0;
-    g_frame_queue_write = 0;
-    g_frame_queue_count = 0;
-    g_frame_present_hold_ticks = 0;
-}
-
-static void enqueue_current_frame(void)
-{
-    u8 *destination;
-
-    if (g_frame_queue_count == FRAME_QUEUE_CAPACITY) {
-        g_frame_queue_read =
-            (g_frame_queue_read + 1u) % FRAME_QUEUE_CAPACITY;
-        --g_frame_queue_count;
-        ++g_frame_queue_drops;
-    }
-    destination = g_frame_queue +
-        g_frame_queue_write * GAM4980_LCD_PACKED_SIZE;
-    bda_memcpy(
-        destination, gam4980_packed_frame(), GAM4980_LCD_PACKED_SIZE
-    );
-    g_frame_queue_write =
-        (g_frame_queue_write + 1u) % FRAME_QUEUE_CAPACITY;
-    ++g_frame_queue_count;
-}
-
-static const u8 *peek_frame_queue(void)
-{
-    if (!g_frame_queue_count)
-        return 0;
-    return g_frame_queue +
-        g_frame_queue_read * GAM4980_LCD_PACKED_SIZE;
-}
-
-static void pop_frame_queue(void)
-{
-    if (!g_frame_queue_count)
-        return;
-    g_frame_queue_read =
-        (g_frame_queue_read + 1u) % FRAME_QUEUE_CAPACITY;
-    --g_frame_queue_count;
-}
-
 static int read_exact(int file, u8 *out, u32 size)
 {
     u32 total = 0;
@@ -737,7 +531,7 @@ static int write_exact(int file, const u8 *data, u32 size)
 
 static void load_ui_config(void)
 {
-    u8 data[10];
+    u8 data[8];
     int file;
     int size;
     u32 read_size;
@@ -746,8 +540,6 @@ static void load_ui_config(void)
     g_input_panel = INPUT_PANEL_GAMEPAD;
     g_lcd_theme = GAM4980_LCD_THEME_OFF;
     g_lcd_ghosting = 0;
-    g_audio_enabled = 1;
-    g_audio_volume = (int)AUDIO_VOLUME_LEVEL_COUNT - 1;
     file = bda_fs_fopen_raw(k_config_path, "rb");
     if (!bda_fs_file_is_valid(file))
         return;
@@ -774,25 +566,19 @@ static void load_ui_config(void)
             g_lcd_theme = data[6];
         if (data[7] <= 1u)
             g_lcd_ghosting = data[7];
-        if (read_size >= 9u && data[8] <= 1u)
-            g_audio_enabled = data[8];
-        if (read_size >= 10u && data[9] < AUDIO_VOLUME_LEVEL_COUNT)
-            g_audio_volume = data[9];
     }
     (void)bda_fs_close_raw(file);
 }
 
 static void write_ui_config(void)
 {
-    u8 data[10] = { 'G', '4', 'S', '1', 0, 0, 0, 0, 0, 0 };
+    u8 data[8] = { 'G', '4', 'S', '1', 0, 0, 0, 0 };
     int file;
 
     data[4] = (u8)g_scale_algorithm;
     data[5] = (u8)g_input_panel;
     data[6] = (u8)g_lcd_theme;
     data[7] = (u8)g_lcd_ghosting;
-    data[8] = (u8)g_audio_enabled;
-    data[9] = (u8)g_audio_volume;
     file = bda_fs_fopen_raw(k_config_path, "wb");
     if (!bda_fs_file_is_valid(file)) {
         log_line("CONFIG OPEN FAILED");
@@ -1352,35 +1138,6 @@ static void draw_settings_overlay(void)
             draw_toggle(row->x + row->width - 46, row->y + 8,
                         g_lcd_ghosting);
         }
-    } else if (g_settings_tab == SETTINGS_TAB_AUDIO) {
-        const ui_rect_t *enabled_row =
-            &k_settings_options[AUDIO_SETTINGS_ENABLED];
-        const ui_rect_t *volume_row =
-            &k_settings_options[AUDIO_SETTINGS_VOLUME];
-        const char *volume_name = k_audio_volume_names[g_audio_volume];
-        int volume_width = label_width(volume_name, 2);
-        u16 enabled_border = g_settings_selection ==
-            AUDIO_SETTINGS_ENABLED ? focus : row_border;
-        u16 volume_border = g_settings_selection ==
-            AUDIO_SETTINGS_VOLUME ? focus : row_border;
-
-        fill_rect(enabled_row->x, enabled_row->y,
-                  enabled_row->width, enabled_row->height, enabled_border);
-        fill_rect(enabled_row->x + 2, enabled_row->y + 2,
-                  enabled_row->width - 4, enabled_row->height - 4, row_fill);
-        draw_text(enabled_row->x + 12, enabled_row->y + 9,
-                  "AUDIO", 2, text);
-        draw_toggle(enabled_row->x + enabled_row->width - 46,
-                    enabled_row->y + 8, g_audio_enabled);
-
-        fill_rect(volume_row->x, volume_row->y,
-                  volume_row->width, volume_row->height, volume_border);
-        fill_rect(volume_row->x + 2, volume_row->y + 2,
-                  volume_row->width - 4, volume_row->height - 4, row_fill);
-        draw_text(volume_row->x + 12, volume_row->y + 9,
-                  "VOLUME", 2, text);
-        draw_text(volume_row->x + volume_row->width - volume_width - 12,
-                  volume_row->y + 9, volume_name, 2, text);
     } else {
         const ui_rect_t *row = &k_settings_options[GAME_SETTINGS_RESTART];
         int width = label_width("RESTART GAME", 2);
@@ -1599,6 +1356,20 @@ static void render_game_screen(const u16 *source)
     fill_rect(0, VIEW_Y - 2, SCREEN_WIDTH, VIEW_HEIGHT + 4, frame);
     scale_lcd_to_view(source);
     copy_lcd_to_full_screen();
+    if (g_game_ended) {
+        u16 panel = rgb565(238, 244, 239);
+        u16 panel_text = rgb565(14, 25, 32);
+        u16 accent = rgb565(41, 178, 178);
+        int heading_width = label_width("GAME EXITED", 1);
+
+        fill_rect(VIEW_X, VIEW_Y, VIEW_WIDTH, VIEW_HEIGHT,
+                  rgb565(22, 34, 42));
+        fill_rect(16, 31, 208, 103, accent);
+        fill_rect(18, 33, 204, 99, panel);
+        draw_text((SCREEN_WIDTH - heading_width) / 2, 45,
+                  "GAME EXITED", 1, panel_text);
+        fill_rect(72, 60, 96, 2, accent);
+    }
     draw_settings_row();
     current_touch_buttons(&buttons, &button_count);
     for (index = 0; index < button_count; ++index)
@@ -1607,9 +1378,29 @@ static void render_game_screen(const u16 *source)
         draw_settings_overlay();
 }
 
+static void draw_game_ended_labels(void)
+{
+    u32 text_color;
+
+    if (!g_game_ended || g_settings_open)
+        return;
+    text_color = (u32)bda_gui_rgb(g_back, 14u, 25u, 32u);
+    (void)bda_gui_set_text_mode(g_back, 1u);
+    (void)bda_gui_set_text_color(g_back, text_color);
+    (void)bda_gui_draw_text(g_back, 80, 73, k_game_exited_text, -1);
+    (void)bda_gui_draw_text(
+        g_back, 56, 102, k_game_exited_action_text, -1
+    );
+}
+
 static void release_draw_context(void)
 {
     bda_handle_t draw = g_draw;
+
+    if (g_back && (s32)g_back != -1)
+        bda_gui_compatible_context_free(g_back);
+    g_back = 0;
+
     if (!draw || (s32)draw == -1) {
         g_draw = 0;
         g_draw_owner = 0;
@@ -1622,8 +1413,12 @@ static void release_draw_context(void)
 
 static int acquire_draw_context(bda_handle_t owner)
 {
-    if (g_draw && g_draw_owner == owner)
-        return 1;
+    if (g_draw && g_draw_owner == owner) {
+        if (g_back && (s32)g_back != -1)
+            return 1;
+        g_back = bda_gui_compatible_context_create(g_draw);
+        return g_back && (s32)g_back != -1;
+    }
     release_draw_context();
     g_draw = bda_gui_current_draw(owner);
     if (!g_draw || (s32)g_draw == -1) {
@@ -1631,6 +1426,14 @@ static int acquire_draw_context(bda_handle_t owner)
         return 0;
     }
     g_draw_owner = owner;
+    g_back = bda_gui_compatible_context_create(g_draw);
+    if (!g_back || (s32)g_back == -1) {
+        g_back = 0;
+        bda_gui_end_draw(g_draw);
+        g_draw = 0;
+        g_draw_owner = 0;
+        return 0;
+    }
     return 1;
 }
 
@@ -1638,6 +1441,7 @@ static int present_screen(const u8 *packed_frame, int advance_ghost)
 {
     const u16 *source = gam4980_expand_frame(packed_frame);
     int draw_result;
+    int copy_result;
     int x = VIEW_X;
     int y = VIEW_Y;
     int width = VIEW_WIDTH;
@@ -1645,13 +1449,11 @@ static int present_screen(const u8 *packed_frame, int advance_ghost)
     bda_gui_picture_t *picture = &g_lcd_picture;
     void *old_object;
 
-    if (!source || !g_draw || !g_draw_object)
+    if (!source || !g_draw || !g_back || !g_draw_object)
         return 0;
     source = prepare_lcd_source(source, advance_ghost);
     if (g_full_redraw) {
         render_game_screen(source);
-        g_full_picture.source_pixels = g_screen_pixels;
-        g_full_picture.selected_index = -1;
         picture = &g_full_picture;
         x = 0;
         y = 0;
@@ -1659,20 +1461,28 @@ static int present_screen(const u8 *packed_frame, int advance_ghost)
         height = SCREEN_HEIGHT;
     } else {
         scale_lcd_to_view(source);
-        g_lcd_picture.source_pixels = g_scaled_framebuffer;
-        g_lcd_picture.selected_index = -1;
     }
 
+    old_object = bda_gui_select_draw_object(g_back, g_draw_object);
+    draw_result = bda_gui_render_picture(
+        g_back, x, y, width, height, picture
+    );
+    if (draw_result == 0 && g_full_redraw)
+        draw_game_ended_labels();
+    (void)bda_gui_select_draw_object(g_back, old_object);
+    if (draw_result != 0)
+        return 0;
     (void)bda_gui_draw_guard_begin();
     old_object = bda_gui_select_draw_object(g_draw, g_draw_object);
-    draw_result = bda_gui_render_picture(
-        g_draw, x, y, width, height, picture
+    copy_result = bda_gui_context_copy(
+        g_back, x, y, width, height,
+        g_draw, x, y, PRESENT_COLOR_KEY
     );
     (void)bda_gui_select_draw_object(g_draw, old_object);
     (void)bda_gui_draw_guard_end();
-    if (draw_result == 0)
+    if (copy_result == 0)
         g_full_redraw = 0;
-    return draw_result == 0;
+    return copy_result == 0;
 }
 
 static int point_in_button(int x, int y, const touch_button_t *button)
@@ -1745,8 +1555,6 @@ static int settings_item_count(void)
 {
     if (g_settings_tab == SETTINGS_TAB_DISPLAY)
         return DISPLAY_SETTINGS_ITEM_COUNT;
-    if (g_settings_tab == SETTINGS_TAB_AUDIO)
-        return AUDIO_SETTINGS_ITEM_COUNT;
     return GAME_SETTINGS_ITEM_COUNT;
 }
 
@@ -1766,7 +1574,6 @@ static void open_settings(void)
 {
     release_touch_key();
     sync_previous_keys();
-    clear_frame_queue();
     g_settings_tab = SETTINGS_TAB_DISPLAY;
     g_settings_selection = g_scale_algorithm;
     g_settings_key_release_ticks = 0;
@@ -1787,7 +1594,6 @@ static void request_session_action(int action)
 {
     release_touch_key();
     sync_previous_keys();
-    clear_frame_queue();
     g_settings_key_release_ticks = 0;
     g_settings_open = 0;
     g_session_action = action;
@@ -1802,9 +1608,8 @@ static void confirm_change_game(void)
 
     release_touch_key();
     sync_previous_keys();
-    clear_frame_queue();
     g_touch_read = g_touch_write;
-    result = bda_confirm(k_window_title, "Select another game?");
+    result = bda_confirm(k_window_title, k_change_game_confirm);
     g_touch_read = g_touch_write;
     sync_previous_keys();
     if (result == BDA_DIALOG_RESULT_YES) {
@@ -1821,7 +1626,6 @@ static void show_help_page(void)
 
     release_touch_key();
     sync_previous_keys();
-    clear_frame_queue();
     g_touch_read = g_touch_write;
     g_escape_pending = 0;
     log_line("HELP PAGE REQUESTED");
@@ -1852,7 +1656,6 @@ static void cycle_lcd_theme(void)
     if (g_lcd_theme >= GAM4980_LCD_THEME_COUNT)
         g_lcd_theme = GAM4980_LCD_THEME_OFF;
     gam4980_set_lcd_theme((u32)g_lcd_theme);
-    clear_frame_queue();
     reset_ghost_frame();
     write_ui_config();
     log_line("LCD COLOR CHANGED");
@@ -1863,36 +1666,9 @@ static void cycle_lcd_theme(void)
 static void toggle_lcd_ghosting(void)
 {
     g_lcd_ghosting = !g_lcd_ghosting;
-    clear_frame_queue();
     reset_ghost_frame();
     write_ui_config();
     log_line(g_lcd_ghosting ? "LCD GHOSTING ON" : "LCD GHOSTING OFF");
-    g_full_redraw = 1;
-}
-
-static void toggle_audio_enabled(void)
-{
-    g_audio_enabled = !g_audio_enabled;
-    if (g_audio_enabled) {
-        audio_stream_start();
-        log_line("AUDIO ENABLED");
-    } else {
-        audio_stream_stop();
-        audio_discard_core();
-        log_line("AUDIO DISABLED");
-    }
-    write_ui_config();
-    g_full_redraw = 1;
-}
-
-static void cycle_audio_volume(void)
-{
-    ++g_audio_volume;
-    if ((u32)g_audio_volume >= AUDIO_VOLUME_LEVEL_COUNT)
-        g_audio_volume = 0;
-    write_ui_config();
-    log_line("AUDIO VOLUME CHANGED");
-    log_line(k_audio_volume_names[g_audio_volume]);
     g_full_redraw = 1;
 }
 
@@ -1903,7 +1679,6 @@ static void apply_settings_selection(void)
             g_settings_selection < SCALE_ALGORITHM_COUNT) {
             if (g_scale_algorithm != g_settings_selection) {
                 g_scale_algorithm = g_settings_selection;
-                clear_frame_queue();
                 write_ui_config();
                 log_line("SCALING CHANGED");
                 log_line(k_algorithm_names[g_scale_algorithm]);
@@ -1915,11 +1690,6 @@ static void apply_settings_selection(void)
                    DISPLAY_SETTINGS_LCD_GHOSTING) {
             toggle_lcd_ghosting();
         }
-    } else if (g_settings_tab == SETTINGS_TAB_AUDIO) {
-        if (g_settings_selection == AUDIO_SETTINGS_ENABLED)
-            toggle_audio_enabled();
-        else if (g_settings_selection == AUDIO_SETTINGS_VOLUME)
-            cycle_audio_volume();
     } else if (g_settings_selection == GAME_SETTINGS_RESTART) {
         request_session_action(SESSION_ACTION_RESTART);
     }
@@ -1930,7 +1700,6 @@ static void toggle_input_panel(void)
     release_touch_key();
     g_input_panel = g_input_panel == INPUT_PANEL_GAMEPAD ?
         INPUT_PANEL_KEYBOARD : INPUT_PANEL_GAMEPAD;
-    clear_frame_queue();
     write_ui_config();
     g_full_redraw = 1;
 }
@@ -1940,7 +1709,6 @@ static void toggle_keyboard_page(void)
     release_touch_key();
     g_keyboard_page = g_keyboard_page == KEYBOARD_PAGE_ALPHA ?
         KEYBOARD_PAGE_FUNCTION : KEYBOARD_PAGE_ALPHA;
-    clear_frame_queue();
     g_full_redraw = 1;
 }
 
@@ -2020,8 +1788,12 @@ static void drain_touches(void)
             g_touch_contact_down = 1;
             g_touch_escape_suppressed = 1;
             if (!g_settings_open && x >= 0 && x < SCREEN_WIDTH &&
-                y >= 0 && y < SCREEN_HEIGHT)
+                y >= 0 && y < SCREEN_HEIGHT) {
                 button = find_touch_button(x, y);
+                if (g_game_ended && button &&
+                    button->key != GAM4980_KEY_EXIT)
+                    button = 0;
+            }
             if (button) {
                 press_touch_button(button);
             } else if (g_touch_had_key && g_touch_key_active) {
@@ -2037,8 +1809,12 @@ static void drain_touches(void)
             g_touch_escape_suppressed = 1;
             release_touch_key();
             if (activate) {
-                clear_frame_queue();
-                gam4980_key_down(button->key);
+                if (g_game_ended) {
+                    g_close_requested = 1;
+                    log_line("EXIT AFTER GAME END");
+                } else {
+                    gam4980_key_down(button->key);
+                }
             } else if (!button) {
                 handle_touch_release(x, y);
             }
@@ -2050,14 +1826,13 @@ static void poll_touch_repeat(u32 now)
 {
     u32 interval;
 
-    if (!g_touch_key_active || !g_touch_button ||
+    if (g_game_ended || !g_touch_key_active || !g_touch_button ||
         !g_touch_button->repeat)
         return;
     interval = g_touch_repeat_fired ? TOUCH_REPEAT_INTERVAL_TICKS :
         TOUCH_REPEAT_DELAY_TICKS;
     if (bda_gui_tick_elapsed_25ms(g_touch_repeat_tick, now) < interval)
         return;
-    clear_frame_queue();
     gam4980_key_down(g_touch_button->key);
     g_touch_repeat_fired = 1;
     g_touch_repeat_tick = now;
@@ -2116,13 +1891,13 @@ static void poll_game_keys(u32 now)
             continue;
         if (pressed & bit) {
             g_hold_frames[index] = 0;
-            clear_frame_queue();
-            gam4980_key_down(packet_key(index));
+            if (!g_game_ended)
+                gam4980_key_down(packet_key(index));
         } else if (current & bit) {
             ++g_hold_frames[index];
             if (g_hold_frames[index] >= 12u &&
-                ((g_hold_frames[index] - 12u) % 3u) == 0u) {
-                clear_frame_queue();
+                ((g_hold_frames[index] - 12u) % 3u) == 0u &&
+                !g_game_ended) {
                 gam4980_key_down(packet_key(index));
             }
         } else {
@@ -2139,8 +1914,12 @@ static void poll_game_keys(u32 now)
         g_close_requested = 1;
         g_escape_pending = 0;
     } else if (g_escape_pending && (released & (1u << 4))) {
-        clear_frame_queue();
-        gam4980_key_down(GAM4980_KEY_EXIT);
+        if (g_game_ended) {
+            g_close_requested = 1;
+            log_line("EXIT AFTER GAME END");
+        } else {
+            gam4980_key_down(GAM4980_KEY_EXIT);
+        }
         g_escape_pending = 0;
     }
     g_previous_keys = current;
@@ -2229,6 +2008,7 @@ static int run_window(void)
     g_frame = 0;
     g_draw = 0;
     g_draw_owner = 0;
+    g_back = 0;
     g_draw_object = 0;
     g_touch_read = 0;
     g_touch_write = 0;
@@ -2246,16 +2026,14 @@ static int run_window(void)
     g_close_requested = 0;
     g_frame_count = 0;
     g_core_frame_phase = 0;
-    g_core_break_logged = 0;
+    g_game_ended = 0;
     g_keyboard_page = KEYBOARD_PAGE_ALPHA;
     g_settings_open = 0;
     g_settings_tab = SETTINGS_TAB_DISPLAY;
     g_settings_selection = g_scale_algorithm;
     g_settings_key_release_ticks = 0;
     g_session_action = SESSION_ACTION_EXIT;
-    clear_frame_queue();
     reset_ghost_frame();
-    g_frame_queue_drops = 0;
 
     descriptor.style = 0;
     descriptor.title = k_window_title;
@@ -2268,14 +2046,14 @@ static int run_window(void)
     (void)bda_gui_frame_activate(g_frame, 0x100);
     (void)acquire_draw_context(g_frame);
     g_draw_object = bda_gui_draw_object_create(7);
-    if (!g_draw || !g_draw_object || (s32)(u32)g_draw_object == -1)
+    if (!g_draw || !g_back || !g_draw_object ||
+        (s32)(u32)g_draw_object == -1)
         goto cleanup;
     last_frame_tick = bda_gui_tick_count_25ms() - 1u;
     last_save_tick = last_frame_tick;
     (void)bda_gui_input_packet(&initial_packet);
     g_previous_keys = packet_mask(&initial_packet);
     log_line("WINDOW START");
-    audio_stream_start();
     window_ok = 1;
     for (;;) {
         int pump_result = bda_gui_event_pump_frame_once(&message, g_frame);
@@ -2294,62 +2072,46 @@ static int run_window(void)
                     !present_screen(gam4980_packed_frame(), 0))
                     log_line("PRESENT FAILED");
             } else {
-                const u8 *queued_frame;
+                int lcd_changed = 0;
 
                 poll_touch_repeat(now);
                 poll_game_keys(now);
-                if (elapsed_ticks >= g_frame_present_hold_ticks)
-                    g_frame_present_hold_ticks = 0;
-                else
-                    g_frame_present_hold_ticks -= elapsed_ticks;
-                g_core_frame_phase += elapsed_ticks * 60u;
-                while (g_core_frame_phase >= 40u) {
-                    gam4980_step_frame();
-                    g_core_frame_phase -= 40u;
-                    if (gam4980_render_frame())
-                        enqueue_current_frame();
+                if (!g_game_ended) {
+                    g_core_frame_phase += elapsed_ticks * 60u;
+                    while (g_core_frame_phase >= 40u) {
+                        gam4980_step_frame();
+                        g_core_frame_phase -= 40u;
+                    }
+                    lcd_changed = gam4980_render_frame();
+                    g_frame_count += elapsed_ticks;
+                    if (gam4980_shutdown_requested()) {
+                        log_hex_value("CORE BRK PC=", gam4980_shutdown_pc());
+                        log_hex_value("CORE FRAME=", g_frame_count);
+                        log_line("GAME ENDED");
+                        g_game_ended = 1;
+                        g_core_frame_phase = 0;
+                        release_touch_key();
+                        reset_ghost_frame();
+                        write_save();
+                        g_full_redraw = 1;
+                    }
                 }
-                g_frame_count += elapsed_ticks;
-                queued_frame = peek_frame_queue();
-                if (queued_frame && !g_frame_present_hold_ticks) {
-                    if (present_screen(queued_frame, 1)) {
-                        pop_frame_queue();
-                        g_frame_present_hold_ticks =
-                            FRAME_PRESENT_HOLD_TICKS;
-                    } else {
+                if (g_full_redraw || lcd_changed ||
+                    (g_lcd_ghosting && g_ghost_fade_pending)) {
+                    if (!present_screen(
+                            gam4980_packed_frame(),
+                            lcd_changed || g_ghost_fade_pending
+                        ))
                         log_line("PRESENT FAILED");
-                    }
-                } else if (!queued_frame && g_full_redraw &&
-                           !present_screen(gam4980_packed_frame(), 0)) {
-                    log_line("PRESENT FAILED");
-                } else if (!queued_frame && !g_frame_present_hold_ticks &&
-                           g_lcd_ghosting && g_ghost_fade_pending) {
-                    if (present_screen(gam4980_packed_frame(), 1)) {
-                        g_frame_present_hold_ticks =
-                            FRAME_PRESENT_HOLD_TICKS;
-                    } else {
-                        log_line("PRESENT FAILED");
-                    }
                 }
             }
         }
-        if (!g_close_requested && g_audio_enabled && g_audio_open)
-            audio_stream_pump();
-        else
-            audio_discard_core();
         if (!g_close_requested &&
             bda_gui_tick_elapsed_25ms(last_save_tick, now) >= SAVE_INTERVAL_TICKS) {
             write_save();
             last_save_tick = now;
         }
-        if (gam4980_shutdown_requested() && !g_core_break_logged) {
-            log_hex_value("CORE BRK PC=", gam4980_shutdown_pc());
-            log_hex_value("CORE FRAME=", g_frame_count);
-            log_hex_value("FRAME DROPS=", g_frame_queue_drops);
-            g_core_break_logged = 1;
-        }
         if (g_close_requested && close_wait == 0) {
-            audio_stream_stop();
             write_save();
             (void)bda_gui_frame_stop(g_frame);
             (void)bda_gui_frame_release(g_frame);
@@ -2364,7 +2126,6 @@ static int run_window(void)
     log_line("WINDOW END");
 
 cleanup:
-    audio_stream_stop();
     release_draw_context();
     if (g_frame) {
         bda_gui_close_frame(g_frame);
