@@ -1,3 +1,5 @@
+![gam4980-player-for9588](assets/readme-header.png)
+
 # gam4980-player-for9588
 
 将 GPLv3 `gam4980` 模拟器核心移植到 BBK 9588。
@@ -6,6 +8,10 @@
 选择器和 9588 裸机载荷的 `GAM4980.BDA`，不会读取或修改其他 BDA 作为
 模板。载荷只使用 `sdk/` Git 子模块 `sdk/sdk/include` 中的正式头文件，
 构建过程不访问父级目录，也不依赖研究头文件或 `reverse` 目录。
+
+## 运行预览
+
+![gam4980-player-for9588 运行预览](assets/runtime-preview.gif)
 
 ## 运行要求
 
