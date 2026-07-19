@@ -81,10 +81,8 @@ git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
-SDK 子模块是私有仓库，因此播放器仓库需要配置 Actions secret
-`SDK_DEPLOY_KEY`。其公钥应作为只读 deploy key 添加到
-`HelloClyde/bbk9588-bda-sdk`，私钥保存为该 secret。工作流只把私钥写入
-runner 临时目录，并在子模块检出后立即删除。
+SDK 子模块是公开仓库。工作流直接使用 `.gitmodules` 中的 HTTPS URL 检出
+固定提交，不需要配置 deploy key 或 Actions secret，fork 后也可以直接构建。
 
 应用通过正式 API `bda_gui_select_file()` 打开固件系统文件选择器。选择器
 默认进入 `A:\gam4980\`，并只显示 `.gam` 文件。选中的游戏会直接流式写入
