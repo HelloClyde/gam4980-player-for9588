@@ -177,9 +177,12 @@ A:\应用\数据\游戏\gam4980\GAM4980.CFG
 
 ## 上游项目
 
-核心源码来自：
+模拟器引擎贡献者：
 
-- <https://codeberg.org/iyzsong/gam4980>
-- 上游提交 `36ce6d076d1103fa4a48e9e775cee28c31c03480`
+- [无云](https://gitee.com/BA4988/BBK-simulator/tree/BA4988/BA4988)
+- [iyzsong](https://codeberg.org/iyzsong/gam4980)
+
+本仓库核心源码基于 iyzsong 的 gam4980，上游提交为
+`36ce6d076d1103fa4a48e9e775cee28c31c03480`。
 
 模拟器核心继续采用 GPLv3 许可证，详见 `COPYING`。
