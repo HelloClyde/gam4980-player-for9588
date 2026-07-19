@@ -46,7 +46,7 @@ jobs:
             throw "Repository secret SDK_DEPLOY_KEY is required to read the private SDK submodule."
           }
 
-          $keyPath = Join-Path $env:RUNNER_TEMP "bbk9588_sdk_deploy_key"
+          $keyPath = Join-Path $env:RUNNER_TEMP "sdk_deploy_key"
           $keyText = $env:SDK_DEPLOY_KEY.Replace("`r", "").TrimEnd() + "`n"
           [IO.File]::WriteAllText(
             $keyPath,
@@ -55,20 +55,20 @@ jobs:
           )
           & icacls.exe $keyPath /inheritance:r /grant:r "${env:USERNAME}:R" | Out-Null
 
-          git submodule sync -- bbk9588-bda-sdk
-          git config submodule.bbk9588-bda-sdk.url `
+          git submodule sync -- sdk
+          git config submodule.sdk.url `
             ssh://git@ssh.github.com:443/HelloClyde/bbk9588-bda-sdk.git
           $env:GIT_SSH_COMMAND = `
             "ssh -i `"$keyPath`" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
           try {
-            git submodule update --init --depth 1 -- bbk9588-bda-sdk
+            git submodule update --init --depth 1 -- sdk
           } finally {
             Remove-Item Env:GIT_SSH_COMMAND -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
           }
 
-          $expected = git rev-parse HEAD:bbk9588-bda-sdk
-          $actual = git -C bbk9588-bda-sdk rev-parse HEAD
+          $expected = git rev-parse HEAD:sdk
+          $actual = git -C sdk rev-parse HEAD
           if ($actual -ne $expected) {
             throw "SDK checkout mismatch: expected $expected, got $actual"
           }
@@ -81,12 +81,12 @@ jobs:
       - name: Restore MIPS toolchain
         uses: actions/cache@v6
         with:
-          path: bbk9588-bda-sdk/tools
-          key: windows-mipsel-none-elf-15.2.0-v1
+          path: sdk/.toolchain
+          key: windows-mipsel-none-elf-15.2.0-v2
 
       - name: Install MIPS toolchain
         shell: pwsh
-        run: ./bbk9588-bda-sdk/scripts/setup_toolchain.ps1
+        run: ./sdk/scripts/setup_toolchain.ps1
 
       - name: Build BDA
         run: python build.py --output "应用/程序/GAM4980.BDA"

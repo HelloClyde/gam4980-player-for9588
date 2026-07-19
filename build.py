@@ -9,13 +9,13 @@ import tempfile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SDK_ROOT = PROJECT_ROOT / "bbk9588-bda-sdk"
+SDK_ROOT = PROJECT_ROOT / "sdk"
 BUILD_ROOT = PROJECT_ROOT / "build"
 
 if not (SDK_ROOT / "bda_packer").is_dir():
     raise SystemExit(
-        "missing bbk9588-bda-sdk submodule; run "
-        "git submodule update --init bbk9588-bda-sdk"
+        "missing sdk submodule; run "
+        "git submodule update --init sdk"
     )
 sys.path.insert(0, str(SDK_ROOT))
 

@@ -8,7 +8,7 @@ import zipfile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SDK_ROOT = PROJECT_ROOT / "bbk9588-bda-sdk"
+SDK_ROOT = PROJECT_ROOT / "sdk"
 APPLICATION_ROOT = PROJECT_ROOT / "应用"
 BDA_PATH = APPLICATION_ROOT / "程序" / "GAM4980.BDA"
 ROM_PATHS = (
@@ -23,8 +23,8 @@ ROM_SIZE = 0x200000
 
 if not (SDK_ROOT / "bda_packer").is_dir():
     raise SystemExit(
-        "missing bbk9588-bda-sdk submodule; run "
-        "git submodule update --init bbk9588-bda-sdk"
+        "missing sdk submodule; run "
+        "git submodule update --init sdk"
     )
 sys.path.insert(0, str(SDK_ROOT))
 

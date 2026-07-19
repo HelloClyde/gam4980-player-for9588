@@ -4,7 +4,7 @@
 
 本项目与 SDK 示例相互独立。它会构建一个拥有独立入口、图标、系统文件
 选择器和 9588 裸机载荷的 `GAM4980.BDA`，不会读取或修改其他 BDA 作为
-模板。载荷只使用 `bbk9588-bda-sdk` Git 子模块 `sdk/include` 中的正式头文件，
+模板。载荷只使用 `sdk/` Git 子模块 `sdk/sdk/include` 中的正式头文件，
 构建过程不访问父级目录，也不依赖研究头文件或 `reverse` 目录。
 
 ## 运行要求
@@ -24,7 +24,7 @@
   A:\应用\数据\游戏\gam4980\E.BIN
   ```
 
-- 初始化 `bbk9588-bda-sdk` 子模块，并使用子模块提供的工具链安装脚本。
+- 初始化 `sdk` 子模块，并使用子模块提供的工具链安装脚本。
 - SDK 子模块的正式头文件需要包含已验证的堆内存、文件定位、系统文件
   选择器、窗口生命周期、原始 RGB565 图片、离屏 compatible context 和矩形复制 API。
 
@@ -42,8 +42,8 @@ A:\gam4980\
 在本项目根目录执行：
 
 ```powershell
-git submodule update --init bbk9588-bda-sdk
-.\bbk9588-bda-sdk\scripts\setup_toolchain.ps1
+git submodule update --init sdk
+.\sdk\scripts\setup_toolchain.ps1
 python .\build.py
 ```
 
